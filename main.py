@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v9.6")
+        self.title("Reliability Data Analyzer v9.7")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -164,7 +164,7 @@ class DataAnalysisApp(tk.Tk):
             df = self.full_load_dataframe(path)
             if df.empty: continue
             
-            # 1. 시료 번호 좌표 규칙: A47 셀부터 아래 방향으로 쭉 나열 (A=0열, 47행=index 46)
+            # 1. 시료 번호 규칙: A47 셀부터 아래 방향 쭉 (A=0열, 47행=index 46)
             test_no_row_idx = 46 
             if len(df) <= test_no_row_idx: continue
             
@@ -176,18 +176,22 @@ class DataAnalysisApp(tk.Tk):
             p_dict = {}
             cont_prefix = ""
             
-            # 2. Parameter 탐색 행 설정 (20행 -> index 19, 27행 -> index 26)
-            p_name_row_idx = 19
-            unit_row_idx = 26
+            # 2. 엑셀 화면 기준 정확한 좌표 매칭 규칙 적용
+            p_name_row_idx = 19  # 20행 (파라미터명: HWSCAN, B-LOW, IGSS 등)
+            unit_row_idx = 26    # 27행 (단위명: uA, V, mA, mR 등)
             max_cols = df.shape[1]
             
-            # 데이터 탐색 루프 (첫 번째 열을 제외한 모든 열을 차례대로 탐색)
-            for col_idx in range(1, max_cols):
+            # ★ 캡쳐 화면 분석 결과: 데이터 항목은 H열(index 7)부터 시작하여 오른쪽으로 연속 나열됨
+            # 데이터 수집 안정성을 위해 7번째 열부터 끝까지 순회합니다.
+            start_col_idx = 7
+            
+            for col_idx in range(start_col_idx, max_cols):
                 if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df):
                     continue
                 
                 p_name_raw = str(df.iloc[p_name_row_idx, col_idx]).strip()
-                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() == "nan": 
+                # 공백이나 무효 문자 패스 예외망 구축
+                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item"]: 
                     continue
                 
                 if self.data_mode == "Module":
@@ -196,30 +200,33 @@ class DataAnalysisApp(tk.Tk):
                         cont_prefix = p_name_raw.upper().split('_')[1]
                         continue
                 
-                # 중복 방지를 위한 아래 3번째 행(23행 -> index 22) 조합 규칙
-                sub_name_idx = p_name_row_idx + 3
+                # 중복 방지를 위한 하단 상세 조건 이름 조합 규칙 (23행 데이터 검증 안전화)
+                sub_name_idx = p_name_row_idx + 3  # 23행(index 22) Bias1 조건 확인
                 p_name_final = p_name_raw
                 if sub_name_idx < len(df):
                     sub_val = str(df.iloc[sub_name_idx, col_idx]).strip()
-                    if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan":
-                        p_name_final = f"{p_name_raw}_{sub_val}"
+                    # 23행 데이터가 유효한 텍스트 기호(숫자 0 제외)일 때만 식별 이름으로 결합
+                    if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan" and sub_val != "0":
+                        # 공백 및 기호 제거 정제화
+                        sub_val_clean = re.sub(r'[\s]+', '', sub_val)
+                        if sub_val_clean and not sub_val_clean.isdigit():
+                            p_name_final = f"{p_name_raw}_{sub_val_clean}"
                 
                 if self.data_mode == "Module" and cont_prefix:
                     p_name_final = f"{cont_prefix}_{p_name_final}"
                 
-                # ★ 버그 수정 핵심 영역: 27행(Unit)이 빈칸이거나 유효하지 않아도 에러 없이 기본 문자 적용
+                # 3. 단위 행(27행) 공백 예외 처리 완벽 방어 코드 적용
                 unit_val = str(df.iloc[unit_row_idx, col_idx]).strip()
                 if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() == "nan" or unit_val == "Unit": 
-                    unit_val = "-"  # 비어있는 단위를 강제로 대시(-) 기호로 치환하여 튕김을 방지합니다.
+                    unit_val = "-"  # 캡쳐 화면의 빈 칸 단위를 안전하게 기호(-)로 채웁니다.
                 
-                # 측정 데이터 값 추출 (A47 행부터 시료 수만큼 데이터 수집)
+                # 4. 측정 데이터 값 추출 (A47행부터 수집)
                 raw_vals = df.iloc[test_no_row_idx : test_no_row_idx + num_samples, col_idx].tolist()
                 vals = pd.to_numeric(raw_vals, errors='coerce').tolist()
                 
-                # 한 열 전체가 유실 데이터가 아니면 비어있는 단위를 안고도 정상 등록 처리
-                if not all(v is None or np.isnan(v) for v in vals): 
-                    p_dict[p_name_final] = {'unit': unit_val, 'values': vals, 'units_map': units}
-                    all_p.add(p_name_final)
+                # 빈 열이 아니라면 데이터셋 등록
+                p_dict[p_name_final] = {'unit': unit_val, 'values': vals, 'units_map': units}
+                all_p.add(p_name_final)
                 
             if p_dict:
                 if group_key in self.lot_groups and any(temp_data[f]['ro'] == ro for f in self.lot_groups[group_key]):
@@ -229,7 +236,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(fname)
 
         if not all_p: 
-            raise ValueError("유효한 파라미터를 찾지 못했습니다. 지정한 셀 좌표(H20, A47, H27)에 올바른 데이터가 있는지 확인해 주세요.")
+            raise ValueError("유효한 파라미터를 추출하지 못했습니다. 엑셀의 데이터 구조나 형식을 다시 확인해 주세요.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -434,7 +441,6 @@ class DataAnalysisApp(tk.Tk):
                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=9, weight='bold')
                     ax.set_xticks(range(len(m['all_samples'])))
                     ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=7)
-                    ax.set_margin = 0.1
                     ax.grid(True, linestyle=":", alpha=0.5)
                     
                     handles, labels = ax.get_legend_handles_labels()
