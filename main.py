@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v9.5")
+        self.title("Reliability Data Analyzer v9.6")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -164,8 +164,7 @@ class DataAnalysisApp(tk.Tk):
             df = self.full_load_dataframe(path)
             if df.empty: continue
             
-            # --- [수정된 핵심 파싱 좌표 규칙 적용 영역] ---
-            # 1. 시료 번호: A47(index 46, col 0) 셀부터 아래 방향 쭉 나열
+            # 1. 시료 번호 좌표 규칙: A47 셀부터 아래 방향으로 쭉 나열 (A=0열, 47행=index 46)
             test_no_row_idx = 46 
             if len(df) <= test_no_row_idx: continue
             
@@ -177,16 +176,13 @@ class DataAnalysisApp(tk.Tk):
             p_dict = {}
             cont_prefix = ""
             
-            # 2. Parameter 이름 및 단위 탐색 루프 설정
-            # Parameter 명: H20 (index 19, col 7) 기준 왼쪽 방향 탐색 가능하게 설계
-            # 단위: H27 (index 26, col 7) 기준 오른쪽 방향 탐색 가능하게 설계
+            # 2. Parameter 탐색 행 설정 (20행 -> index 19, 27행 -> index 26)
             p_name_row_idx = 19
             unit_row_idx = 26
-            
             max_cols = df.shape[1]
             
+            # 데이터 탐색 루프 (첫 번째 열을 제외한 모든 열을 차례대로 탐색)
             for col_idx in range(1, max_cols):
-                # Out of bounds 예외 방지 안전망 코드 추가
                 if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df):
                     continue
                 
@@ -211,19 +207,19 @@ class DataAnalysisApp(tk.Tk):
                 if self.data_mode == "Module" and cont_prefix:
                     p_name_final = f"{cont_prefix}_{p_name_final}"
                 
-                # 단위 가져오기 (27행 -> index 26)
+                # ★ 버그 수정 핵심 영역: 27행(Unit)이 빈칸이거나 유효하지 않아도 에러 없이 기본 문자 적용
                 unit_val = str(df.iloc[unit_row_idx, col_idx]).strip()
                 if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() == "nan" or unit_val == "Unit": 
-                    continue
+                    unit_val = "-"  # 비어있는 단위를 강제로 대시(-) 기호로 치환하여 튕김을 방지합니다.
                 
-                # 측정 데이터 값 추출 (A47 시작 지점과 매칭)
+                # 측정 데이터 값 추출 (A47 행부터 시료 수만큼 데이터 수집)
                 raw_vals = df.iloc[test_no_row_idx : test_no_row_idx + num_samples, col_idx].tolist()
                 vals = pd.to_numeric(raw_vals, errors='coerce').tolist()
                 
-                if all(v is None or np.isnan(v) for v in vals): continue
-                
-                p_dict[p_name_final] = {'unit': unit_val, 'values': vals, 'units_map': units}
-                all_p.add(p_name_final)
+                # 한 열 전체가 유실 데이터가 아니면 비어있는 단위를 안고도 정상 등록 처리
+                if not all(v is None or np.isnan(v) for v in vals): 
+                    p_dict[p_name_final] = {'unit': unit_val, 'values': vals, 'units_map': units}
+                    all_p.add(p_name_final)
                 
             if p_dict:
                 if group_key in self.lot_groups and any(temp_data[f]['ro'] == ro for f in self.lot_groups[group_key]):
@@ -438,6 +434,7 @@ class DataAnalysisApp(tk.Tk):
                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=9, weight='bold')
                     ax.set_xticks(range(len(m['all_samples'])))
                     ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=7)
+                    ax.set_margin = 0.1
                     ax.grid(True, linestyle=":", alpha=0.5)
                     
                     handles, labels = ax.get_legend_handles_labels()
