@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v9.1")
+        self.title("Reliability Data Analyzer v9.5")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -97,7 +97,6 @@ class DataAnalysisApp(tk.Tk):
 
     def parse_filename_info(self, filename):
         name_we = os.path.splitext(filename)[0]
-        
         lot_match = re.search(r'(lot[\s_\-]*[a-zA-Z0-9]+)', name_we, re.IGNORECASE)
         lot_str = lot_match.group(1).upper().replace(" ", "").replace("_","").replace("-","") if lot_match else "UNKNOWN_LOT"
         
@@ -126,7 +125,7 @@ class DataAnalysisApp(tk.Tk):
             except: return pd.read_csv(path, header=None, engine='python')
         else:
             try: return pd.read_excel(path, header=None)
-            except: return pd.read_excel(path, header=None, engine='excel')
+            except: return pd.read_excel(path, header=None, engine='openpyxl')
 
     def handle_file_upload(self):
         files = filedialog.askopenfilenames(title="파일 선택", filetypes=[("Data Files", "*.csv *.xlsx *.xls")])
@@ -149,8 +148,7 @@ class DataAnalysisApp(tk.Tk):
             try:
                 self.process_files(files, pb)
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", f"분석 오류 발생:
-{str(e)}"))
+                self.after(0, lambda: messagebox.showerror("Error", f"분석 오류 발생:\n{str(e)}"))
                 if pb.winfo_exists(): pb.destroy()
         threading.Thread(target=target_thread, daemon=True).start()
 
@@ -166,21 +164,12 @@ class DataAnalysisApp(tk.Tk):
             df = self.full_load_dataframe(path)
             if df.empty: continue
             
-            # 유저 지정 명시적 좌표 반영
-            # 1. 시료 번호: A47(index 46, 0)에서 아래로 쭉
-            test_no_row_idx = 45  # A46이 'Test No.'가 있고 A47부터 데이터 시작인 구조 대응을 위해 기준점 매칭
-            # 안전장치: 실제 데이터 크기가 이보다 작으면 유연하게 행 탐색
-            if len(df) <= 46:
-                for i in range(len(df)):
-                    if "test no." in str(df.iloc[i, 0]).lower():
-                        test_no_row_idx = i; break
-            else:
-                for i in range(len(df)):
-                    if "test no." in str(df.iloc[i, 0]).lower():
-                        test_no_row_idx = i; break
+            # --- [수정된 핵심 파싱 좌표 규칙 적용 영역] ---
+            # 1. 시료 번호: A47(index 46, col 0) 셀부터 아래 방향 쭉 나열
+            test_no_row_idx = 46 
+            if len(df) <= test_no_row_idx: continue
             
-            # 시료 번호 추출 (A47(index 46) 이하 전체)
-            raw_units = df.iloc[test_no_row_idx + 1:, 0].tolist()
+            raw_units = df.iloc[test_no_row_idx:, 0].tolist()
             units = [str(u).strip().replace(".0", "") for u in raw_units if pd.notna(u) and str(u).strip() != ""]
             num_samples = len(units)
             if num_samples == 0: continue
@@ -188,26 +177,30 @@ class DataAnalysisApp(tk.Tk):
             p_dict = {}
             cont_prefix = ""
             
-            # 파라미터 이름 행 (20행 -> index 19)
-            # 단위 행 (27행 -> index 26)
+            # 2. Parameter 이름 및 단위 탐색 루프 설정
+            # Parameter 명: H20 (index 19, col 7) 기준 왼쪽 방향 탐색 가능하게 설계
+            # 단위: H27 (index 26, col 7) 기준 오른쪽 방향 탐색 가능하게 설계
             p_name_row_idx = 19
             unit_row_idx = 26
             
-            # 각 열 분석 (G열=index 6, H열=index 7 등 데이터가 존재하는 모든 열 자동 순회)
-            for col_idx in range(1, df.shape[1]):
-                if col_idx >= df.shape[1]: break
+            max_cols = df.shape[1]
+            
+            for col_idx in range(1, max_cols):
+                # Out of bounds 예외 방지 안전망 코드 추가
+                if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df):
+                    continue
                 
                 p_name_raw = str(df.iloc[p_name_row_idx, col_idx]).strip()
-                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() == "nan": continue
+                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() == "nan": 
+                    continue
                 
-                # Module 모드 규칙 적용: CONT_XX 구분 기호 관리 및 scan 제외
                 if self.data_mode == "Module":
                     if "scan" in p_name_raw.lower(): continue
                     if p_name_raw.upper().startswith("CONT_"):
                         cont_prefix = p_name_raw.upper().split('_')[1]
                         continue
                 
-                # 동일 이름 반복 처리 규칙: 아래로 3번째 행 내용 검사 및 추가 (20행 + 3 = 23행)
+                # 중복 방지를 위한 아래 3번째 행(23행 -> index 22) 조합 규칙
                 sub_name_idx = p_name_row_idx + 3
                 p_name_final = p_name_raw
                 if sub_name_idx < len(df):
@@ -215,20 +208,16 @@ class DataAnalysisApp(tk.Tk):
                     if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan":
                         p_name_final = f"{p_name_raw}_{sub_val}"
                 
-                # CONT_ 접두사 규칙 최종 결합
                 if self.data_mode == "Module" and cont_prefix:
                     p_name_final = f"{cont_prefix}_{p_name_final}"
                 
-                # 단위 탐색 규칙: 27행(index 26)의 단위 매칭
-                unit_val = ""
-                if unit_row_idx < len(df):
-                    unit_val = str(df.iloc[unit_row_idx, col_idx]).strip()
+                # 단위 가져오기 (27행 -> index 26)
+                unit_val = str(df.iloc[unit_row_idx, col_idx]).strip()
+                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() == "nan" or unit_val == "Unit": 
+                    continue
                 
-                # 단위가 없거나 공란이면 파라미터 그래프에서 제외
-                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() == "nan" or unit_val == "Unit": continue
-                
-                # 시료별 데이터 수집
-                raw_vals = df.iloc[test_no_row_idx + 1 : test_no_row_idx + 1 + num_samples, col_idx].tolist()
+                # 측정 데이터 값 추출 (A47 시작 지점과 매칭)
+                raw_vals = df.iloc[test_no_row_idx : test_no_row_idx + num_samples, col_idx].tolist()
                 vals = pd.to_numeric(raw_vals, errors='coerce').tolist()
                 
                 if all(v is None or np.isnan(v) for v in vals): continue
@@ -243,7 +232,8 @@ class DataAnalysisApp(tk.Tk):
                 if group_key not in self.lot_groups: self.lot_groups[group_key] = []
                 self.lot_groups[group_key].append(fname)
 
-        if not all_p: raise ValueError("조건에 맞는 유효한 파라미터(단위 필수 존재 등)를 찾지 못했습니다. 파일 구조를 확인해주세요.")
+        if not all_p: 
+            raise ValueError("유효한 파라미터를 찾지 못했습니다. 지정한 셀 좌표(H20, A47, H27)에 올바른 데이터가 있는지 확인해 주세요.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -321,7 +311,7 @@ class DataAnalysisApp(tk.Tk):
 
     def build_chart_data_structures(self, target_group_key):
         lot_files = self.lot_groups[target_group_key]
-        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#e31a1c', '#33a02c', '#fdbf6f', '#cab2d6', '#6a3d9a', '#b15928']
+        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         
         line_plots_meta = []
         box_plots_meta = []
@@ -406,9 +396,7 @@ class DataAnalysisApp(tk.Tk):
                         b_data.append(vals)
                         a_labels.append(self.raw_files_data[fn]['ro'])
                         b_cols.append(base_colors[f_idx % len(base_colors)])
-                        stats.append(f"[{self.raw_files_data[fn]['ro']}]
-Avg:{np.mean(vals):.1f}
-Std:{np.std(vals):.1f}")
+                        stats.append(f"[{self.raw_files_data[fn]['ro']}]\nAvg:{np.mean(vals):.1f}\nStd:{np.std(vals):.1f}")
             
             if b_data: box_plots_meta.append({'title': f"{param} Dist", 'b_data': b_data, 'a_labels': a_labels, 'b_cols': b_cols, 'stats': stats})
 
@@ -501,7 +489,7 @@ Std:{np.std(vals):.1f}")
         self.center_window(m, 450, 180); m.transient(self); m.grab_set()
         
         tk.Label(m, text=f"선택 시료 번호: {unit_id} ({ro_info})", font=("맑은 고딕", 11, "bold")).pack(pady=10)
-        color_section = tk.LabelFrame(m, text="변경할 색상 선택 (선택 시 세모 마커로 자동 변환)", font=("맑은 고딕", 9))
+        color_section = tk.LabelFrame(m, text="변경할 색상 선택", font=("맑은 고딕", 9))
         color_section.pack(fill=tk.X, padx=15, pady=5)
         
         distinct_palette = ["#FF0000", "#0026ff", "#00b321", "#9400d3", "#ff8c00"]
@@ -514,7 +502,7 @@ Std:{np.std(vals):.1f}")
             btn.pack(side=tk.LEFT, padx=8)
             
         action_f = tk.Frame(m); action_f.pack(pady=10)
-        tk.Button(action_f, text="🗑️ 해당 시료 데이터 삭제 (Box연동)", bg="#2c3e50", fg="white", font=("맑은 고딕", 9, "bold"),
+        tk.Button(action_f, text="🗑️ 해당 시료 데이터 삭제", bg="#2c3e50", fg="white", font=("맑은 고딕", 9, "bold"),
                   command=lambda: [m.destroy(), self.run_with_progress_pop("시료 데이터 제외 중", lambda: self.delete_target_unit(g_key, param, unit_id))]).pack(side=tk.LEFT, padx=10)
         tk.Button(action_f, text="창 닫기", command=m.destroy).pack(side=tk.LEFT, padx=10)
 
@@ -555,8 +543,7 @@ Std:{np.std(vals):.1f}")
             try:
                 with open(path, 'a'): pass
             except IOError:
-                messagebox.showerror("수정 불가", "동일한 이름의 PDF 리포트 파일이 열려 있습니다.
-닫고 다시 시도하세요.")
+                messagebox.showerror("수정 불가", "동일한 이름의 PDF 리포트 파일이 열려 있습니다.\n닫고 다시 시도하세요.")
                 return
 
         pb = AutoClosingProgressPop(self, "PDF 리포트 저장 중")
@@ -572,11 +559,7 @@ Std:{np.std(vals):.1f}")
                         line_meta, box_meta = self.build_chart_data_structures(g_key)
                         
                         if line_meta:
-                            if self.data_mode == "Module":
-                                cols, rows, items_per_page = 3, 3, 9  
-                            else:
-                                cols, rows, items_per_page = 1, 3, 3  
-                            
+                            cols, rows, items_per_page = (3, 3, 9) if self.data_mode == "Module" else (1, 3, 3)
                             for i in range(0, len(line_meta), items_per_page):
                                 chunk = line_meta[i:i+items_per_page]
                                 fig, axes = plt.subplots(rows, cols, figsize=(11, 8.5), squeeze=False)
@@ -625,9 +608,7 @@ Std:{np.std(vals):.1f}")
                                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=8, weight='bold')
                                     ax.grid(True, alpha=0.3)
                                     
-                                    stat_str = "
-".join([s.replace('
-', ' ') for s in m['stats']])
+                                    stat_str = "\n".join([s.replace('\n', ' ') for s in m['stats']])
                                     ax.text(0.05, -0.4, stat_str, transform=ax.transAxes, fontsize=5, verticalalignment='top')
                                 
                                 for idx in range(len(chunk), b_rows * b_cols): axes[idx // b_cols, idx % b_cols].axis('off')
@@ -636,10 +617,9 @@ Std:{np.std(vals):.1f}")
                                 plt.close(fig)
                                 
                 self.after(0, pb.update_progress, 100, 100, "완료")
-                self.after(300, lambda: messagebox.showinfo("Success", "지정하신 규칙 기반의 매칭 PDF 저장이 완료되었습니다."))
+                self.after(300, lambda: messagebox.showinfo("Success", "매칭 PDF 저장이 완료되었습니다."))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("PDF Export Error", f"PDF 컴파일 에러:
-{str(e)}"))
+                self.after(0, lambda: messagebox.showerror("PDF Export Error", f"PDF 컴파일 에러:\n{str(e)}"))
                 if pb.winfo_exists(): pb.destroy()
 
         threading.Thread(target=pdf_thread, daemon=True).start()
