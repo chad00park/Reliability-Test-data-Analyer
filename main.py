@@ -29,7 +29,7 @@ except:
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v4.0 - [All Errors Resolved]")
+        self.title("Reliability Data Analyzer v4.1 - [Safe Out of Bounds]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -63,7 +63,6 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
-        # UNKNOWN_LOT 방지를 위해 매칭 정규식 조건 대폭 확장
         lot_match = re.search(r'(lot[\s_\-]*[a-zA-Z0-9]+)', filename, re.IGNORECASE)
         lot_str = lot_match.group(1).upper().replace(" ", "").replace("_","").replace("-","") if lot_match else "UNKNOWN_LOT"
         
@@ -73,7 +72,6 @@ class DataAnalysisApp(tk.Tk):
         return lot_str, ro_str, ro_num
 
     def smart_read_csv_or_excel(self, path):
-        # 첫 번째 토큰화(Fields 모호성) 에러 완벽 대처 멀티 엔진 스크립트 적용
         if path.endswith('.csv'):
             try:
                 return pd.read_csv(path, header=None, engine='c', on_bad_lines='skip')
@@ -81,14 +79,17 @@ class DataAnalysisApp(tk.Tk):
                 try:
                     return pd.read_csv(path, header=None, engine='python', on_bad_lines='skip')
                 except Exception as e:
-                    # 최악의 행 깨짐 구조 발생 시 수동 슬라이싱 파싱 처리로 우회
                     lines = []
                     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                         for line in f:
                             lines.append(line.strip().split(','))
                     return pd.DataFrame(lines)
         else:
-            return pd.read_excel(path, header=None)
+            try:
+                return pd.read_excel(path, header=None)
+            except Exception as e:
+                # 엑셀 엔진 에러 대비 openpyxl 강제 지정 우회
+                return pd.read_excel(path, header=None, engine='openpyxl')
 
     def handle_file_upload(self):
         files = filedialog.askopenfilenames(title="파일 선택", filetypes=[("Data Files", "*.csv *.xlsx *.xls")])
@@ -108,16 +109,20 @@ class DataAnalysisApp(tk.Tk):
     def process_files(self, files):
         try:
             df_s = self.smart_read_csv_or_excel(files[0])
+            if df_s.empty:
+                raise ValueError("첫 번째 파일이 비어있거나 읽을 수 없습니다.")
+                
             p_idx, u_idx, sample_start_row = None, None, None
             
             for i, r in df_s.iterrows():
+                if r.empty or pd.isna(r.iloc[0]): continue
                 val_first_col = str(r.iloc[0]).strip().lower().replace(" ", "")
                 if "parameter" in val_first_col: p_idx = i
                 if "unit" in val_first_col: u_idx = i
                 if "sample" in val_first_col: sample_start_row = i
 
             if p_idx is None or u_idx is None or sample_start_row is None: 
-                raise ValueError("파일 내에서 'Parameter', 'Unit' 혹은 'sample' 행을 식별하지 못했습니다.")
+                raise ValueError("파일 내에서 'Parameter', 'Unit' 혹은 'sample' 행을 식별하지 못했습니다.\n양식을 확인해주세요.")
 
             temp_data, all_p, self.lot_groups = {}, set(), {}
             
@@ -125,8 +130,14 @@ class DataAnalysisApp(tk.Tk):
                 fname = os.path.basename(path)
                 lot, ro, ro_n = self.parse_filename_info(fname)
                 df = self.smart_read_csv_or_excel(path)
+                if df.empty: continue
+                
+                # Out of bounds 에러 원천 차단: 행/열 크기 검증 안전장치 추가
+                if sample_start_row + 1 >= len(df): continue
                 
                 units = df.iloc[sample_start_row + 1:, 0].dropna().astype(str).tolist()
+                
+                if p_idx >= len(df) or u_idx >= len(df): continue
                 raw_p = df.iloc[p_idx, 1:].tolist()
                 raw_u = df.iloc[u_idx, 1:].tolist()
                 
@@ -153,7 +164,11 @@ class DataAnalysisApp(tk.Tk):
                     un = str(raw_u[c_idx]).strip() if c_idx < len(raw_u) and not pd.isna(raw_u[c_idx]) else ""
                     if not un: continue
                     
-                    vals = pd.to_numeric(df.iloc[sample_start_row + 1:, c_idx + 1], errors='coerce').tolist()
+                    # Out of bounds 예방: 열 인덱스 범위 확인
+                    target_col_idx = c_idx + 1
+                    if target_col_idx >= df.shape[1]: continue
+                    
+                    vals = pd.to_numeric(df.iloc[sample_start_row + 1:, target_col_idx], errors='coerce').tolist()
                     vals = vals[:len(units)]
                     
                     if all(v is None or np.isnan(v) for v in vals): continue
@@ -163,6 +178,9 @@ class DataAnalysisApp(tk.Tk):
                 temp_data[fname] = {'lot': lot, 'ro': ro, 'ro_num': ro_n, 'params': p_dict}
                 if lot not in self.lot_groups: self.lot_groups[lot] = []
                 self.lot_groups[lot].append(fname)
+
+            if not all_p:
+                raise ValueError("가져온 파일들에서 유효한 파라미터 데이터를 찾지 못했습니다.")
 
             self.parameter_list = sorted(list(all_p))
             self.raw_files_data = temp_data
@@ -408,7 +426,6 @@ class DataAnalysisApp(tk.Tk):
         btn_frame.pack(pady=5)
         
         for hex_code in distinct_palette:
-            # 두 번째 에러 원인 해결: 'LEFT' 문자열 오타를 tk.LEFT 상수로 완전 제어
             btn = tk.Button(btn_frame, bg=hex_code, activebackground=hex_code, width=5, height=2, bd=2, relief=tk.RAISED,
                             command=lambda l=lot, p=param, u=unit_id, c=hex_code: [m.destroy(), self.apply_point_color(l, p, u, c)])
             btn.pack(side=tk.LEFT, padx=8)
