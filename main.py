@@ -35,7 +35,6 @@ class ProgressBarPop(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
         
-        # 화면 중앙 정렬
         self.update_idletasks()
         ws = self.winfo_screenwidth()
         hs = self.winfo_screenheight()
@@ -50,7 +49,7 @@ class ProgressBarPop(tk.Toplevel):
         self.progress.pack(pady=5)
         
     def update_progress(self, current, total, text=""):
-        percent = int((current / total) * 100)
+        percent = int((current / total) * 100) if total > 0 else 0
         self.progress['value'] = percent
         self.lbl.config(text=f"{text} ({percent}%)")
         self.update()
@@ -58,7 +57,7 @@ class ProgressBarPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v5.0 - [All Layout & PDF Errors Fixed]")
+        self.title("Reliability Data Analyzer v5.5 - [Perfect Read-out Matching]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -92,22 +91,33 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
-        # 파일명에서 Lot 형태 추출 정규식 고도화
+        # 1. LOT 추출 강화
         lot_match = re.search(r'(lot[\s_\-]*[a-zA-Z0-9]+)', filename, re.IGNORECASE)
         lot_str = lot_match.group(1).upper().replace(" ", "").replace("_","").replace("-","") if lot_match else "UNKNOWN_LOT"
         
-        # 파일명에서 Read-out 형태(ex: 0hr, 168hr, 0cyc, 500cyc)를 추출하되 실패 시 파일명 전체 활용
-        ro_match = re.search(r'(\d+\s*(?:hr|cyc|min|sec|day|wk|month))', filename, re.IGNORECASE)
+        # 2. Read-out 추출 정규식 대폭 확장 (임의의 숫자+텍스트 조합 매칭)
+        ro_match = re.search(r'(\d+\s*(?:hr|cyc|min|sec|day|wk|month|r|t|step|st))', filename, re.IGNORECASE)
         if ro_match:
             ro_str = ro_match.group(1).lower().replace(" ", "")
             ro_num = int(re.findall(r'\d+', ro_str)[0])
         else:
-            # 매칭 안 될 경우 파일명에서 숫자 추출 시도
+            # 특수 단위가 없더라도 파일명 내부의 모든 숫자를 조합하여 고유 Read-out 이름 생성
             nums = re.findall(r'\d+', filename)
-            ro_str = filename.replace(".xlsx","").replace(".csv","").replace(".xls","")
-            ro_num = int(nums[0]) if nums else 99999
-            
+            if nums:
+                ro_num = int(nums[-1]) # 가장 마지막 숫자를 순서 정렬용 숫자로 사용
+                ro_str = f"{ro_num}_ReadOut"
+            else:
+                # 숫자도 전혀 없는 경우 확장자를 제외한 파일명 전체를 사용
+                ro_str = os.path.splitext(filename)[0]
+                ro_num = 99999
+                
         return lot_str, ro_str, ro_num
+
+    def clean_sample_id(self, s_id):
+        """시료 번호 매칭 실패를 방지하기 위해 공백 및 특수문자를 제거하고 표준화합니다."""
+        if pd.isna(s_id): return ""
+        s_str = str(s_id).strip().replace(" ", "").replace(".0", "")
+        return s_str
 
     def smart_read_csv_or_excel(self, path):
         if path.endswith('.csv'):
@@ -139,7 +149,6 @@ class DataAnalysisApp(tk.Tk):
         self.data_mode = mode
         win.destroy()
         
-        # 프로그레스 바 연동을 위해 별도 쓰레드로 분석 실행
         pb = ProgressBarPop(self, "데이터 읽는 중")
         def target_thread():
             try: self.process_files(files, pb)
@@ -167,15 +176,17 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            # 프로그레스바 팝업 업데이트
-            self.after(0, pb.update_progress, idx, total_files, f"파일 파싱 중: {fname[:20]}...")
+            self.after(0, pb.update_progress, idx, total_files, f"파일 분석 중 ({idx+1}/{total_files})")
             
             lot, ro, ro_n = self.parse_filename_info(fname)
             df = self.smart_read_csv_or_excel(path)
             if df.empty or sample_start_row + 1 >= len(df): continue
             if p_idx >= len(df) or u_idx >= len(df): continue
             
-            units = df.iloc[sample_start_row + 1:, 0].dropna().astype(str).tolist()
+            # [핵심 수정] 시료명 추출 시 공백 및 포맷 전처리 일괄 청소 적용
+            raw_units = df.iloc[sample_start_row + 1:, 0].tolist()
+            units = [self.clean_sample_id(u) for u in raw_units if self.clean_sample_id(u) != ""]
+            
             raw_p = df.iloc[p_idx, 1:].tolist()
             raw_u = df.iloc[u_idx, 1:].tolist()
             
@@ -210,6 +221,10 @@ class DataAnalysisApp(tk.Tk):
                 p_dict[pn] = {'unit': un, 'values': vals, 'units_map': units[:len(vals)]}
                 all_p.add(pn)
             
+            # Read-out 중복 가드 (동일 파일명 혹은 중복 추출 대응)
+            if lot in self.lot_groups and any(temp_data[f]['ro'] == ro for f in self.lot_groups[lot]):
+                ro = f"{ro}_{idx}"
+                
             temp_data[fname] = {'lot': lot, 'ro': ro, 'ro_num': ro_n, 'params': p_dict}
             if lot not in self.lot_groups: self.lot_groups[lot] = []
             self.lot_groups[lot].append(fname)
@@ -277,8 +292,8 @@ class DataAnalysisApp(tk.Tk):
 
     def build_chart_data_structures(self, target_lot):
         lot_files = self.lot_groups[target_lot]
-        # 다양한 Read-out 구분을 위한 뚜렷한 색상 정의
-        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#e31a1c', '#33a02c']
+        # 고유 선 구분을 보장하기 위해 팔레트 대폭 확장
+        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#e31a1c', '#33a02c', '#fdbf6f', '#cab2d6', '#6a3d9a', '#b15928']
         
         line_plots_meta = []
         box_plots_meta = []
@@ -299,11 +314,13 @@ class DataAnalysisApp(tk.Tk):
                 ro_lbl = self.raw_files_data[filename]['ro']
                 
                 for s_id, val in zip(p_info['units_map'], p_info['values']):
-                    s_str = str(s_id)
+                    s_str = self.clean_sample_id(s_id)
+                    if s_str == "": continue
                     all_samples_set.add(s_str)
                     if s_str not in master_map: master_map[s_str] = {}
                     master_map[s_str][ro_lbl] = val
 
+            # 시료 번호 순서 정렬
             try: all_samples = sorted(list(all_samples_set), key=lambda x: float(re.findall(r'\d+\.?\d*', x)[0]) if re.findall(r'\d+\.?\d*', x) else x)
             except: all_samples = sorted(list(all_samples_set))
 
@@ -322,7 +339,6 @@ class DataAnalysisApp(tk.Tk):
             del_set = self.deleted_units.get((target_lot, param), set())
             lines_dataset = []
 
-            # 모든 Read-out을 독립 선으로 추적하여 데이터 누락 방지
             for f_idx, filename in enumerate(lot_files):
                 ro_lbl = self.raw_files_data[filename]['ro']
                 px, py, pc, pm = [], [], [], []
@@ -359,7 +375,7 @@ class DataAnalysisApp(tk.Tk):
             for f_idx, fn in enumerate(lot_files):
                 if param in self.raw_files_data[fn]['params']:
                     p_info = self.raw_files_data[fn]['params'][param]
-                    vals = [uy for ux, uy in zip(p_info['units_map'], p_info['values']) if uy is not None and not np.isnan(uy) and str(ux) not in del_set]
+                    vals = [uy for ux, uy in zip(p_info['units_map'], p_info['values']) if uy is not None and not np.isnan(uy) and self.clean_sample_id(ux) not in del_set]
                     if vals:
                         b_data.append(vals)
                         a_labels.append(self.raw_files_data[fn]['ro'])
@@ -373,7 +389,7 @@ class DataAnalysisApp(tk.Tk):
     def execute_ui_rendering(self):
         for w in self.scrollable_frame.winfo_children(): w.destroy()
         
-        # Lot 별로 정렬하여 완전히 독립된 단독 그래프 그룹(Section)을 형성
+        # [Lot 분리 완벽 구현] Lot 별로 독립된 섹션 구성 및 독립 차트 렌더링
         for lot_key in sorted(self.lot_groups.keys()):
             line_meta, box_meta = self.build_chart_data_structures(lot_key)
             if not line_meta and not box_meta: continue
@@ -395,11 +411,11 @@ class DataAnalysisApp(tk.Tk):
                 for c in range(cols): grid_frame.grid_columnconfigure(c, weight=1)
                 
                 for idx, m in enumerate(line_meta):
-                    fig, ax = plt.subplots(figsize=(4.2 if cols==3 else 13.0, 3.2))
+                    fig, ax = plt.subplots(figsize=(4.2 if cols==3 else 13.0, 3.4))
                     
-                    # 하나의 파라미터 그래프 안에 모든 Read-out 라인을 겹쳐서 플롯
+                    # [멀티 Read-out 중첩 핵심] 모든 추이 데이터를 단일 축에 축적
                     for px, py, pc, pm, ro_lbl, b_col in m['dataset']:
-                        ax.plot(px, py, color=b_col, alpha=0.6, zorder=1, label=ro_lbl)
+                        ax.plot(px, py, color=b_col, alpha=0.7, linewidth=1.5, zorder=1, label=ro_lbl)
                         for xi, yi, ci, mi in zip(px, py, pc, pm):
                             sc = ax.scatter(xi, yi, color=ci, marker=mi, s=55 if mi=='^' else 35, zorder=3, picker=True)
                             sc.__dict__['metadata'] = {'lot': lot_key, 'param': m['param'], 'unit': xi, 'ro': ro_lbl}
@@ -504,7 +520,6 @@ class DataAnalysisApp(tk.Tk):
         path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF 리포트 파일", "*.pdf")])
         if not path: return
         
-        # [해결] 프로세스 점유에 따른 Permission Denied 예외 방어 검증 코드 추가
         if os.path.exists(path):
             try:
                 with open(path, 'a'): pass
