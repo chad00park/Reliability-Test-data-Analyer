@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import threading
 import numpy as np
 import pandas as pd
 import tkinter as tk
@@ -8,7 +9,6 @@ from tkinter import ttk, messagebox, filedialog
 
 import matplotlib
 matplotlib.use("TkAgg")
-# Y축 마이너스 기호(🔲 깨짐 현상) 완벽 해결 보완
 matplotlib.rcParams['axes.unicode_minus'] = False
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
@@ -26,10 +26,39 @@ try:
 except:
     pass
 
+class ProgressBarPop(tk.Toplevel):
+    def __init__(self, parent, title="Processing"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("350x120")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        
+        # 화면 중앙 정렬
+        self.update_idletasks()
+        ws = self.winfo_screenwidth()
+        hs = self.winfo_screenheight()
+        x = (ws / 2) - (175)
+        y = (hs / 2) - (60)
+        self.geometry(f'350x120+{int(x)}+{int(y)}')
+        
+        self.lbl = tk.Label(self, text="준비 중...", font=("Arial", 10))
+        self.lbl.pack(pady=15)
+        
+        self.progress = ttk.Progressbar(self, orient="horizontal", length=280, mode="determinate")
+        self.progress.pack(pady=5)
+        
+    def update_progress(self, current, total, text=""):
+        percent = int((current / total) * 100)
+        self.progress['value'] = percent
+        self.lbl.config(text=f"{text} ({percent}%)")
+        self.update()
+
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v4.1 - [Safe Out of Bounds]")
+        self.title("Reliability Data Analyzer v5.0 - [All Layout & PDF Errors Fixed]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -63,33 +92,36 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
+        # 파일명에서 Lot 형태 추출 정규식 고도화
         lot_match = re.search(r'(lot[\s_\-]*[a-zA-Z0-9]+)', filename, re.IGNORECASE)
         lot_str = lot_match.group(1).upper().replace(" ", "").replace("_","").replace("-","") if lot_match else "UNKNOWN_LOT"
         
-        ro_match = re.search(r'(\d+\s*(?:hr|cyc|min|sec|day))', filename, re.IGNORECASE)
-        ro_str = ro_match.group(1).lower().replace(" ", "") if ro_match else filename
-        ro_num = int(re.findall(r'\d+', ro_str)[0]) if re.findall(r'\d+', ro_str) else 99999
+        # 파일명에서 Read-out 형태(ex: 0hr, 168hr, 0cyc, 500cyc)를 추출하되 실패 시 파일명 전체 활용
+        ro_match = re.search(r'(\d+\s*(?:hr|cyc|min|sec|day|wk|month))', filename, re.IGNORECASE)
+        if ro_match:
+            ro_str = ro_match.group(1).lower().replace(" ", "")
+            ro_num = int(re.findall(r'\d+', ro_str)[0])
+        else:
+            # 매칭 안 될 경우 파일명에서 숫자 추출 시도
+            nums = re.findall(r'\d+', filename)
+            ro_str = filename.replace(".xlsx","").replace(".csv","").replace(".xls","")
+            ro_num = int(nums[0]) if nums else 99999
+            
         return lot_str, ro_str, ro_num
 
     def smart_read_csv_or_excel(self, path):
         if path.endswith('.csv'):
-            try:
-                return pd.read_csv(path, header=None, engine='c', on_bad_lines='skip')
+            try: return pd.read_csv(path, header=None, engine='c', on_bad_lines='skip')
             except:
-                try:
-                    return pd.read_csv(path, header=None, engine='python', on_bad_lines='skip')
-                except Exception as e:
+                try: return pd.read_csv(path, header=None, engine='python', on_bad_lines='skip')
+                except:
                     lines = []
                     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for line in f:
-                            lines.append(line.strip().split(','))
+                        for line in f: lines.append(line.strip().split(','))
                     return pd.DataFrame(lines)
         else:
-            try:
-                return pd.read_excel(path, header=None)
-            except Exception as e:
-                # 엑셀 엔진 에러 대비 openpyxl 강제 지정 우회
-                return pd.read_excel(path, header=None, engine='openpyxl')
+            try: return pd.read_excel(path, header=None)
+            except: return pd.read_excel(path, header=None, engine='openpyxl')
 
     def handle_file_upload(self):
         files = filedialog.askopenfilenames(title="파일 선택", filetypes=[("Data Files", "*.csv *.xlsx *.xls")])
@@ -104,93 +136,94 @@ class DataAnalysisApp(tk.Tk):
         tk.Button(f, text="Module", width=10, command=lambda: self.start_proc(files, "Module", m)).pack(side=tk.LEFT, padx=5)
 
     def start_proc(self, files, mode, win):
-        self.data_mode = mode; win.destroy(); self.process_files(files)
+        self.data_mode = mode
+        win.destroy()
+        
+        # 프로그레스 바 연동을 위해 별도 쓰레드로 분석 실행
+        pb = ProgressBarPop(self, "데이터 읽는 중")
+        def target_thread():
+            try: self.process_files(files, pb)
+            except Exception as e: messagebox.showerror("Error", str(e))
+            finally: pb.destroy()
+        threading.Thread(target=target_thread, daemon=True).start()
 
-    def process_files(self, files):
-        try:
-            df_s = self.smart_read_csv_or_excel(files[0])
-            if df_s.empty:
-                raise ValueError("첫 번째 파일이 비어있거나 읽을 수 없습니다.")
-                
-            p_idx, u_idx, sample_start_row = None, None, None
+    def process_files(self, files, pb):
+        df_s = self.smart_read_csv_or_excel(files[0])
+        if df_s.empty: raise ValueError("첫 번째 파일이 비어있어 구조 파싱이 불가능합니다.")
             
-            for i, r in df_s.iterrows():
-                if r.empty or pd.isna(r.iloc[0]): continue
-                val_first_col = str(r.iloc[0]).strip().lower().replace(" ", "")
-                if "parameter" in val_first_col: p_idx = i
-                if "unit" in val_first_col: u_idx = i
-                if "sample" in val_first_col: sample_start_row = i
+        p_idx, u_idx, sample_start_row = None, None, None
+        for i, r in df_s.iterrows():
+            if r.empty or pd.isna(r.iloc[0]): continue
+            val_first_col = str(r.iloc[0]).strip().lower().replace(" ", "")
+            if "parameter" in val_first_col: p_idx = i
+            if "unit" in val_first_col: u_idx = i
+            if "sample" in val_first_col: sample_start_row = i
 
-            if p_idx is None or u_idx is None or sample_start_row is None: 
-                raise ValueError("파일 내에서 'Parameter', 'Unit' 혹은 'sample' 행을 식별하지 못했습니다.\n양식을 확인해주세요.")
+        if p_idx is None or u_idx is None or sample_start_row is None: 
+            raise ValueError("파일 내에서 'Parameter', 'Unit' 혹은 'sample' 기준행을 찾을 수 없습니다.")
 
-            temp_data, all_p, self.lot_groups = {}, set(), {}
+        temp_data, all_p, self.lot_groups = {}, set(), {}
+        total_files = len(files)
+        
+        for idx, path in enumerate(files):
+            fname = os.path.basename(path)
+            # 프로그레스바 팝업 업데이트
+            self.after(0, pb.update_progress, idx, total_files, f"파일 파싱 중: {fname[:20]}...")
             
-            for path in files:
-                fname = os.path.basename(path)
-                lot, ro, ro_n = self.parse_filename_info(fname)
-                df = self.smart_read_csv_or_excel(path)
-                if df.empty: continue
-                
-                # Out of bounds 에러 원천 차단: 행/열 크기 검증 안전장치 추가
-                if sample_start_row + 1 >= len(df): continue
-                
-                units = df.iloc[sample_start_row + 1:, 0].dropna().astype(str).tolist()
-                
-                if p_idx >= len(df) or u_idx >= len(df): continue
-                raw_p = df.iloc[p_idx, 1:].tolist()
-                raw_u = df.iloc[u_idx, 1:].tolist()
-                
-                final_p, prefix = [], ""
-                for p in raw_p:
-                    ps = str(p).strip() if not pd.isna(p) else ""
-                    if self.data_mode == "Module" and ps.lower().startswith("cont_"):
-                        prefix = ps.split('_')[1]; final_p.append(ps)
-                    else:
-                        final_p.append(f"{prefix}_{ps}" if prefix and self.data_mode == "Module" else ps)
-                
-                counts = {}; numbered_p = []
-                for p in final_p:
-                    if not p: numbered_p.append(""); continue
-                    counts[p] = counts.get(p, 0) + 1; numbered_p.append(p)
-                cur = {}
-                for idx, p in enumerate(numbered_p):
-                    if p and counts[p] > 1:
-                        cur[p] = cur.get(p, 0) + 1; numbered_p[idx] = f"{p}{cur[p]}"
-
-                p_dict = {}
-                for c_idx, pn in enumerate(numbered_p):
-                    if not pn or "cont_" in pn.lower(): continue
-                    un = str(raw_u[c_idx]).strip() if c_idx < len(raw_u) and not pd.isna(raw_u[c_idx]) else ""
-                    if not un: continue
-                    
-                    # Out of bounds 예방: 열 인덱스 범위 확인
-                    target_col_idx = c_idx + 1
-                    if target_col_idx >= df.shape[1]: continue
-                    
-                    vals = pd.to_numeric(df.iloc[sample_start_row + 1:, target_col_idx], errors='coerce').tolist()
-                    vals = vals[:len(units)]
-                    
-                    if all(v is None or np.isnan(v) for v in vals): continue
-                    p_dict[pn] = {'unit': un, 'values': vals, 'units_map': units[:len(vals)]}
-                    all_p.add(pn)
-                
-                temp_data[fname] = {'lot': lot, 'ro': ro, 'ro_num': ro_n, 'params': p_dict}
-                if lot not in self.lot_groups: self.lot_groups[lot] = []
-                self.lot_groups[lot].append(fname)
-
-            if not all_p:
-                raise ValueError("가져온 파일들에서 유효한 파라미터 데이터를 찾지 못했습니다.")
-
-            self.parameter_list = sorted(list(all_p))
-            self.raw_files_data = temp_data
+            lot, ro, ro_n = self.parse_filename_info(fname)
+            df = self.smart_read_csv_or_excel(path)
+            if df.empty or sample_start_row + 1 >= len(df): continue
+            if p_idx >= len(df) or u_idx >= len(df): continue
             
-            for l in self.lot_groups: 
-                self.lot_groups[l].sort(key=lambda x: self.raw_files_data[x]['ro_num'])
-                self.lot_display_names[l] = l
+            units = df.iloc[sample_start_row + 1:, 0].dropna().astype(str).tolist()
+            raw_p = df.iloc[p_idx, 1:].tolist()
+            raw_u = df.iloc[u_idx, 1:].tolist()
+            
+            final_p, prefix = [], ""
+            for p in raw_p:
+                ps = str(p).strip() if not pd.isna(p) else ""
+                if self.data_mode == "Module" and ps.lower().startswith("cont_"):
+                    prefix = ps.split('_')[1]; final_p.append(ps)
+                else:
+                    final_p.append(f"{prefix}_{ps}" if prefix and self.data_mode == "Module" else ps)
+            
+            counts = {}; numbered_p = []
+            for p in final_p:
+                if not p: numbered_p.append(""); continue
+                counts[p] = counts.get(p, 0) + 1; numbered_p.append(p)
+            cur = {}
+            for i_p, p in enumerate(numbered_p):
+                if p and counts[p] > 1:
+                    cur[p] = cur.get(p, 0) + 1; numbered_p[i_p] = f"{p}{cur[p]}"
+
+            p_dict = {}
+            for c_idx, pn in enumerate(numbered_p):
+                if not pn or "cont_" in pn.lower(): continue
+                un = str(raw_u[c_idx]).strip() if c_idx < len(raw_u) and not pd.isna(raw_u[c_idx]) else ""
+                if not un: continue
+                if c_idx + 1 >= df.shape[1]: continue
                 
-            self.init_analysis_menu()
-        except Exception as e: messagebox.showerror("Error", str(e))
+                vals = pd.to_numeric(df.iloc[sample_start_row + 1:, c_idx + 1], errors='coerce').tolist()
+                vals = vals[:len(units)]
+                
+                if all(v is None or np.isnan(v) for v in vals): continue
+                p_dict[pn] = {'unit': un, 'values': vals, 'units_map': units[:len(vals)]}
+                all_p.add(pn)
+            
+            temp_data[fname] = {'lot': lot, 'ro': ro, 'ro_num': ro_n, 'params': p_dict}
+            if lot not in self.lot_groups: self.lot_groups[lot] = []
+            self.lot_groups[lot].append(fname)
+
+        if not all_p: raise ValueError("가져온 데이터 세트에 유효한 파라미터가 없습니다.")
+        
+        self.parameter_list = sorted(list(all_p))
+        self.raw_files_data = temp_data
+        
+        for l in self.lot_groups: 
+            self.lot_groups[l].sort(key=lambda x: self.raw_files_data[x]['ro_num'])
+            self.lot_display_names[l] = l
+            
+        self.after(0, self.init_analysis_menu)
 
     def init_analysis_menu(self):
         for widget in self.winfo_children(): widget.destroy()
@@ -199,7 +232,7 @@ class DataAnalysisApp(tk.Tk):
         ctrl_f = tk.LabelFrame(t, text="Analysis Control Panel", font=("Arial", 9, "bold"), bg="#f4f4f4", padx=10)
         ctrl_f.pack(side=tk.RIGHT, padx=10)
         
-        tk.Checkbutton(ctrl_f, text="Delta Mode (%)", variable=self.is_delta_mode, bg="#f4f4f4", command=self.start_async_render).pack(side=tk.LEFT, padx=5)
+        tk.Checkbutton(ctrl_f, text="Delta Mode (%)", variable=self.is_delta_mode, bg="#f4f4f4", command=self.execute_ui_rendering).pack(side=tk.LEFT, padx=5)
         tk.Button(ctrl_f, text="↩ 되돌리기 (Undo)", font=("Arial", 9, "bold"), bg="#7f8c8d", fg="white", command=self.perform_undo).pack(side=tk.LEFT, padx=5)
         tk.Button(ctrl_f, text="📄 가로 포맷 PDF 리포트 저장", font=("Arial", 9, "bold"), bg="#c0392b", fg="white", command=self.export_to_pdf).pack(side=tk.LEFT, padx=5)
 
@@ -216,7 +249,7 @@ class DataAnalysisApp(tk.Tk):
         self.param_listbox.selection_set(0)
 
         btn_f = tk.Frame(t, bg="#f4f4f4"); btn_f.pack(fill=tk.X)
-        tk.Button(btn_f, text="그래프 그리기", bg="#107c41", fg="white", font=("Arial", 10, "bold"), command=self.start_async_render).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_f, text="그래프 그리기", bg="#107c41", fg="white", font=("Arial", 10, "bold"), command=self.update_selections_and_render).pack(side=tk.LEFT, padx=5)
         
         c = tk.Frame(self); c.pack(fill=tk.BOTH, expand=True)
         self.canvas = tk.Canvas(c, highlightthickness=0)
@@ -229,12 +262,12 @@ class DataAnalysisApp(tk.Tk):
         self.scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width))
         self.canvas.bind_all("<MouseWheel>", self._on_mouse_wheel)
-        self.start_async_render()
+        self.update_selections_and_render()
 
     def _on_mouse_wheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-    def start_async_render(self):
+    def update_selections_and_render(self):
         selections = self.param_listbox.curselection()
         sel_items = [self.param_listbox.get(i) for i in selections]
         if "★ 전체 선택" in sel_items: self.selected_parameters = self.parameter_list.copy()
@@ -244,7 +277,8 @@ class DataAnalysisApp(tk.Tk):
 
     def build_chart_data_structures(self, target_lot):
         lot_files = self.lot_groups[target_lot]
-        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        # 다양한 Read-out 구분을 위한 뚜렷한 색상 정의
+        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#e31a1c', '#33a02c']
         
         line_plots_meta = []
         box_plots_meta = []
@@ -270,10 +304,8 @@ class DataAnalysisApp(tk.Tk):
                     if s_str not in master_map: master_map[s_str] = {}
                     master_map[s_str][ro_lbl] = val
 
-            try:
-                all_samples = sorted(list(all_samples_set), key=lambda x: float(re.findall(r'\d+\.?\d*', x)[0]) if re.findall(r'\d+\.?\d*', x) else x)
-            except:
-                all_samples = sorted(list(all_samples_set))
+            try: all_samples = sorted(list(all_samples_set), key=lambda x: float(re.findall(r'\d+\.?\d*', x)[0]) if re.findall(r'\d+\.?\d*', x) else x)
+            except: all_samples = sorted(list(all_samples_set))
 
             if self.is_delta_mode.get() and len(lot_files) > 0:
                 ref_ro = self.raw_files_data[lot_files[0]]['ro']
@@ -285,16 +317,16 @@ class DataAnalysisApp(tk.Tk):
                             if v is not None and not np.isnan(v):
                                 master_map[s_id][ro_lbl] = 100.0 * (v - ref_val) / ref_val
                     else:
-                        for ro_lbl in master_map[s_id]:
-                            master_map[s_id][ro_lbl] = np.nan
+                        for ro_lbl in master_map[s_id]: master_map[s_id][ro_lbl] = np.nan
 
             del_set = self.deleted_units.get((target_lot, param), set())
             lines_dataset = []
 
+            # 모든 Read-out을 독립 선으로 추적하여 데이터 누락 방지
             for f_idx, filename in enumerate(lot_files):
                 ro_lbl = self.raw_files_data[filename]['ro']
-                
                 px, py, pc, pm = [], [], [], []
+                
                 for s_id in all_samples:
                     if s_id in del_set: continue
                     val = master_map[s_id].get(ro_lbl, np.nan)
@@ -311,7 +343,8 @@ class DataAnalysisApp(tk.Tk):
                         pc.append(base_colors[f_idx % len(base_colors)])
                         pm.append('o')
                 
-                if px: lines_dataset.append((px, py, pc, pm, ro_lbl, base_colors[f_idx % len(base_colors)]))
+                if px:
+                    lines_dataset.append((px, py, pc, pm, ro_lbl, base_colors[f_idx % len(base_colors)]))
 
             if lines_dataset:
                 display_unit = "%" if self.is_delta_mode.get() else unit_str
@@ -340,8 +373,10 @@ class DataAnalysisApp(tk.Tk):
     def execute_ui_rendering(self):
         for w in self.scrollable_frame.winfo_children(): w.destroy()
         
+        # Lot 별로 정렬하여 완전히 독립된 단독 그래프 그룹(Section)을 형성
         for lot_key in sorted(self.lot_groups.keys()):
             line_meta, box_meta = self.build_chart_data_structures(lot_key)
+            if not line_meta and not box_meta: continue
             
             header_f = tk.Frame(self.scrollable_frame, bg="#eaf2f8", pady=6)
             header_f.pack(fill=tk.X, padx=10, pady=5)
@@ -360,9 +395,11 @@ class DataAnalysisApp(tk.Tk):
                 for c in range(cols): grid_frame.grid_columnconfigure(c, weight=1)
                 
                 for idx, m in enumerate(line_meta):
-                    fig, ax = plt.subplots(figsize=(4.2 if cols==3 else 13.0, 2.8))
+                    fig, ax = plt.subplots(figsize=(4.2 if cols==3 else 13.0, 3.2))
+                    
+                    # 하나의 파라미터 그래프 안에 모든 Read-out 라인을 겹쳐서 플롯
                     for px, py, pc, pm, ro_lbl, b_col in m['dataset']:
-                        ax.plot(px, py, color=b_col, alpha=0.5, zorder=1, label=ro_lbl)
+                        ax.plot(px, py, color=b_col, alpha=0.6, zorder=1, label=ro_lbl)
                         for xi, yi, ci, mi in zip(px, py, pc, pm):
                             sc = ax.scatter(xi, yi, color=ci, marker=mi, s=55 if mi=='^' else 35, zorder=3, picker=True)
                             sc.__dict__['metadata'] = {'lot': lot_key, 'param': m['param'], 'unit': xi, 'ro': ro_lbl}
@@ -421,7 +458,6 @@ class DataAnalysisApp(tk.Tk):
         color_section.pack(fill=tk.X, padx=15, pady=5)
         
         distinct_palette = ["#FF0000", "#0026ff", "#00b321", "#9400d3", "#ff8c00"]
-        
         btn_frame = tk.Frame(color_section)
         btn_frame.pack(pady=5)
         
@@ -468,70 +504,91 @@ class DataAnalysisApp(tk.Tk):
         path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF 리포트 파일", "*.pdf")])
         if not path: return
         
-        try:
-            with PdfPages(path) as pdf:
-                for lot_key in sorted(self.lot_groups.keys()):
-                    line_meta, box_meta = self.build_chart_data_structures(lot_key)
+        # [해결] 프로세스 점유에 따른 Permission Denied 예외 방어 검증 코드 추가
+        if os.path.exists(path):
+            try:
+                with open(path, 'a'): pass
+            except IOError:
+                messagebox.showerror("수정 불가", "동일한 이름의 PDF 리포트 파일이 이미 열려 있습니다.\n파일을 닫은 다음 다시 시도해 주세요.")
+                return
+
+        pb = ProgressBarPop(self, "PDF 리포트 내보내는 중")
+        
+        def pdf_thread():
+            try:
+                with PdfPages(path) as pdf:
+                    lots = sorted(self.lot_groups.keys())
+                    total_steps = len(lots)
                     
-                    if line_meta:
-                        cols = 3 if self.data_mode == "Module" else 1
-                        items_per_page = 6 if cols == 3 else 3
+                    for step, lot_key in enumerate(lots):
+                        self.after(0, pb.update_progress, step, total_steps, f"[{lot_key}] 컴파일 중...")
+                        line_meta, box_meta = self.build_chart_data_structures(lot_key)
                         
-                        for i in range(0, len(line_meta), items_per_page):
-                            chunk = line_meta[i:i+items_per_page]
-                            rows = int(np.ceil(len(chunk) / cols))
-                            
-                            fig, axes = plt.subplots(rows, cols, figsize=(11, 8.5), squeeze=False)
-                            for idx, m in enumerate(chunk):
-                                r, c = idx // cols, idx % cols
-                                ax = axes[r, c]
+                        if line_meta:
+                            cols = 3 if self.data_mode == "Module" else 1
+                            items_per_page = 6 if cols == 3 else 3
+                            for i in range(0, len(line_meta), items_per_page):
+                                chunk = line_meta[i:i+items_per_page]
+                                rows = int(np.ceil(len(chunk) / cols))
                                 
-                                for px, py, pc, pm, ro_lbl, b_col in m['dataset']:
-                                    ax.plot(px, py, color=b_col, alpha=0.5, label=ro_lbl)
-                                    for xi, yi, ci, mi in zip(px, py, pc, pm):
-                                        ax.scatter(xi, yi, color=ci, marker=mi, s=40 if mi=='^' else 20)
-                                
-                                ax.set_title(f"[{self.lot_display_names[lot_key]}] {m['title']}", fontsize=8, weight='bold')
-                                ax.set_xticks(range(len(m['all_samples'])))
-                                ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=6)
-                                ax.grid(True, linestyle=":", alpha=0.4)
-                            
-                            for idx in range(len(chunk), rows * cols): axes[idx // cols, idx % cols].axis('off')
-                            plt.tight_layout()
-                            pdf.savefig(fig, dpi=200)
-                            plt.close(fig)
-                            
-                    if box_meta:
-                        cols = 4
-                        items_per_page = 8
-                        for i in range(0, len(box_meta), items_per_page):
-                            chunk = box_meta[i:i+items_per_page]
-                            rows = int(np.ceil(len(chunk) / cols))
-                            
-                            fig, axes = plt.subplots(rows, cols, figsize=(11, 8.5), squeeze=False)
-                            for idx, m in enumerate(chunk):
-                                r, c = idx // cols, idx % cols
-                                ax = axes[r, c]
-                                
-                                bp = ax.boxplot(m['b_data'], patch_artist=True)
-                                ax.set_xticklabels(m['a_labels'], fontsize=7)
-                                for patch, color in zip(bp['boxes'], m['b_cols']):
-                                    patch.set_facecolor(color); patch.set_alpha(0.5)
+                                fig, axes = plt.subplots(rows, cols, figsize=(11, 8.5), squeeze=False)
+                                for idx, m in enumerate(chunk):
+                                    r, c = idx // cols, idx % cols
+                                    ax = axes[r, c]
                                     
-                                ax.set_title(f"[{self.lot_display_names[lot_key]}] {m['title']}", fontsize=8, weight='bold')
-                                ax.grid(True, alpha=0.3)
+                                    for px, py, pc, pm, ro_lbl, b_col in m['dataset']:
+                                        ax.plot(px, py, color=b_col, alpha=0.5, label=ro_lbl)
+                                        for xi, yi, ci, mi in zip(px, py, pc, pm):
+                                            ax.scatter(xi, yi, color=ci, marker=mi, s=40 if mi=='^' else 20)
+                                    
+                                    ax.set_title(f"[{self.lot_display_names[lot_key]}] {m['title']}", fontsize=8, weight='bold')
+                                    ax.set_xticks(range(len(m['all_samples'])))
+                                    ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=6)
+                                    ax.grid(True, linestyle=":", alpha=0.4)
+                                    
+                                    handles, labels = ax.get_legend_handles_labels()
+                                    by_label = dict(zip(labels, handles))
+                                    if by_label: ax.legend(by_label.values(), by_label.keys(), loc="best", fontsize=5)
                                 
-                                stat_str = "\n".join([s.replace('\n', ' ') for s in m['stats']])
-                                ax.text(0.05, -0.4, stat_str, transform=ax.transAxes, fontsize=5, verticalalignment='top')
-                            
-                            for idx in range(len(chunk), rows * cols): axes[idx // cols, idx % cols].axis('off')
-                            plt.tight_layout()
-                            pdf.savefig(fig, dpi=200)
-                            plt.close(fig)
-                            
-            messagebox.showinfo("Success", "가로 포맷의 PDF 리포트 저장이 성공적으로 완료되었습니다.")
-        except Exception as e:
-            messagebox.showerror("PDF Export Error", f"PDF 컴파일 에러:\n{str(e)}")
+                                for idx in range(len(chunk), rows * cols): axes[idx // cols, idx % cols].axis('off')
+                                plt.tight_layout()
+                                pdf.savefig(fig, dpi=200)
+                                plt.close(fig)
+                                
+                        if box_meta:
+                            cols, items_per_page = 4, 8
+                            for i in range(0, len(box_meta), items_per_page):
+                                chunk = box_meta[i:i+items_per_page]
+                                rows = int(np.ceil(len(chunk) / cols))
+                                
+                                fig, axes = plt.subplots(rows, cols, figsize=(11, 8.5), squeeze=False)
+                                for idx, m in enumerate(chunk):
+                                    r, c = idx // cols, idx % cols
+                                    ax = axes[r, c]
+                                    
+                                    bp = ax.boxplot(m['b_data'], patch_artist=True)
+                                    ax.set_xticklabels(m['a_labels'], fontsize=7)
+                                    for patch, color in zip(bp['boxes'], m['b_cols']):
+                                        patch.set_facecolor(color); patch.set_alpha(0.5)
+                                        
+                                    ax.set_title(f"[{self.lot_display_names[lot_key]}] {m['title']}", fontsize=8, weight='bold')
+                                    ax.grid(True, alpha=0.3)
+                                    
+                                    stat_str = "\n".join([s.replace('\n', ' ') for s in m['stats']])
+                                    ax.text(0.05, -0.4, stat_str, transform=ax.transAxes, fontsize=5, verticalalignment='top')
+                                
+                                for idx in range(len(chunk), rows * cols): axes[idx // cols, idx % cols].axis('off')
+                                plt.tight_layout()
+                                pdf.savefig(fig, dpi=200)
+                                plt.close(fig)
+                                
+                self.after(0, lambda: messagebox.showinfo("Success", "가로 포맷의 PDF 리포트 저장이 성공적으로 완료되었습니다."))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("PDF Export Error", f"PDF 컴파일 에러:\n{str(e)}"))
+            finally:
+                self.after(0, pb.destroy)
+
+        threading.Thread(target=pdf_thread, daemon=True).start()
 
 if __name__ == "__main__":
     DataAnalysisApp().mainloop()
