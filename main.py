@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v9.0")
+        self.title("Reliability Data Analyzer v9.1")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -96,7 +96,6 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
-        # 무작위 순서의 파일명에서 HTRB, TC 등의 테스트 항목명, Lot번호, Read-out 추출
         name_we = os.path.splitext(filename)[0]
         
         lot_match = re.search(r'(lot[\s_\-]*[a-zA-Z0-9]+)', name_we, re.IGNORECASE)
@@ -111,7 +110,6 @@ class DataAnalysisApp(tk.Tk):
             ro_num = int(nums[-1]) if nums else 99999
             ro_str = f"{ro_num}_ReadOut" if nums else "0HR"
             
-        # 남은 영역에서 신뢰성 항목명 유추 (예: HTRB, TC 등)
         rem = name_we
         if lot_match: rem = rem.replace(lot_match.group(1), "")
         if ro_match: rem = rem.replace(ro_match.group(1), "")
@@ -119,7 +117,6 @@ class DataAnalysisApp(tk.Tk):
         tokens = [t for t in rem.split(' ') if t and not t.isdigit()]
         test_item = tokens[0].upper() if tokens else "RELIABILITY_TEST"
         
-        # 메인 그룹 키 조합: "신뢰성항목_LOT번호"
         group_key = f"{test_item}_{lot_str}"
         return group_key, ro_str, ro_num, test_item, lot_str
 
@@ -152,7 +149,8 @@ class DataAnalysisApp(tk.Tk):
             try:
                 self.process_files(files, pb)
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", f"분석 오류 발생:\n{str(e)}"))
+                self.after(0, lambda: messagebox.showerror("Error", f"분석 오류 발생:
+{str(e)}"))
                 if pb.winfo_exists(): pb.destroy()
         threading.Thread(target=target_thread, daemon=True).start()
 
@@ -162,35 +160,26 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"파일 개별 파싱 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"파일 파싱 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
             if df.empty: continue
             
-            # 1열에서 'Test No.'가 포함된 행 검색
-            test_no_row_idx = None
-            for i in range(len(df)):
-                val = str(df.iloc[i, 0]).strip()
-                if "test no." in val.lower():
-                    test_no_row_idx = i; break
+            # 유저 지정 명시적 좌표 반영
+            # 1. 시료 번호: A47(index 46, 0)에서 아래로 쭉
+            test_no_row_idx = 45  # A46이 'Test No.'가 있고 A47부터 데이터 시작인 구조 대응을 위해 기준점 매칭
+            # 안전장치: 실제 데이터 크기가 이보다 작으면 유연하게 행 탐색
+            if len(df) <= 46:
+                for i in range(len(df)):
+                    if "test no." in str(df.iloc[i, 0]).lower():
+                        test_no_row_idx = i; break
+            else:
+                for i in range(len(df)):
+                    if "test no." in str(df.iloc[i, 0]).lower():
+                        test_no_row_idx = i; break
             
-            if test_no_row_idx is None: continue
-            
-            # T1, T2, T3... 형식이 있는 헤더 지시어 행 찾기 (Test No. 주변 탐색)
-            t_header_row_idx = None
-            for i in range(max(0, test_no_row_idx - 5), min(len(df), test_no_row_idx + 5)):
-                row_str = [str(x).strip() for x in df.iloc[i].tolist()]
-                if any(re.match(r'^T\d+$', x, re.IGNORECASE) for x in row_str):
-                    t_header_row_idx = i; break
-            
-            if t_header_row_idx is None: t_header_row_idx = test_no_row_idx
-            
-            # 파라미터 이름 행은 T_header 행 바로 아래열
-            p_name_row_idx = t_header_row_idx + 1
-            if p_name_row_idx >= len(df): continue
-            
-            # 시료 번호 추출 (Test No. 행 아래쪽 전체)
+            # 시료 번호 추출 (A47(index 46) 이하 전체)
             raw_units = df.iloc[test_no_row_idx + 1:, 0].tolist()
             units = [str(u).strip().replace(".0", "") for u in raw_units if pd.notna(u) and str(u).strip() != ""]
             num_samples = len(units)
@@ -199,8 +188,15 @@ class DataAnalysisApp(tk.Tk):
             p_dict = {}
             cont_prefix = ""
             
-            # 각 열 분석 (1열 이후 데이터 열 전체)
+            # 파라미터 이름 행 (20행 -> index 19)
+            # 단위 행 (27행 -> index 26)
+            p_name_row_idx = 19
+            unit_row_idx = 26
+            
+            # 각 열 분석 (G열=index 6, H열=index 7 등 데이터가 존재하는 모든 열 자동 순회)
             for col_idx in range(1, df.shape[1]):
+                if col_idx >= df.shape[1]: break
+                
                 p_name_raw = str(df.iloc[p_name_row_idx, col_idx]).strip()
                 if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() == "nan": continue
                 
@@ -211,29 +207,27 @@ class DataAnalysisApp(tk.Tk):
                         cont_prefix = p_name_raw.upper().split('_')[1]
                         continue
                 
-                # 동일 이름 반복 처리 규칙: 아래로 3번째 행 내용 검사 및 추가
+                # 동일 이름 반복 처리 규칙: 아래로 3번째 행 내용 검사 및 추가 (20행 + 3 = 23행)
                 sub_name_idx = p_name_row_idx + 3
                 p_name_final = p_name_raw
                 if sub_name_idx < len(df):
                     sub_val = str(df.iloc[sub_name_idx, col_idx]).strip()
                     if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan":
-                        # 이름이 중복되는 경우에만 결합하는 로직 대신 명시성 및 안전성을 위해 규칙 결합
                         p_name_final = f"{p_name_raw}_{sub_val}"
                 
                 # CONT_ 접두사 규칙 최종 결합
                 if self.data_mode == "Module" and cont_prefix:
                     p_name_final = f"{cont_prefix}_{p_name_final}"
                 
-                # 단위 탐색 규칙: 파라미터 이름 아래로 7번째 행
-                unit_row_idx = p_name_row_idx + 7
+                # 단위 탐색 규칙: 27행(index 26)의 단위 매칭
                 unit_val = ""
                 if unit_row_idx < len(df):
                     unit_val = str(df.iloc[unit_row_idx, col_idx]).strip()
                 
                 # 단위가 없거나 공란이면 파라미터 그래프에서 제외
-                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() == "nan": continue
+                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() == "nan" or unit_val == "Unit": continue
                 
-                # 시료별 데이터 수집 (숫자 외 문자는 공란/NaN 인식)
+                # 시료별 데이터 수집
                 raw_vals = df.iloc[test_no_row_idx + 1 : test_no_row_idx + 1 + num_samples, col_idx].tolist()
                 vals = pd.to_numeric(raw_vals, errors='coerce').tolist()
                 
@@ -249,14 +243,13 @@ class DataAnalysisApp(tk.Tk):
                 if group_key not in self.lot_groups: self.lot_groups[group_key] = []
                 self.lot_groups[group_key].append(fname)
 
-        if not all_p: raise ValueError("조건에 맞는 유효한 파라미터(단위 필수 존재 등)를 찾지 못했습니다.")
+        if not all_p: raise ValueError("조건에 맞는 유효한 파라미터(단위 필수 존재 등)를 찾지 못했습니다. 파일 구조를 확인해주세요.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
         
         for g_key in self.lot_groups:
             self.lot_groups[g_key].sort(key=lambda x: self.raw_files_data[x]['ro_num'])
-            # 기본 디스플레이 이름 지정
             f_meta = self.raw_files_data[self.lot_groups[g_key][0]]
             self.lot_display_names[g_key] = f"{f_meta['test_item']}_{f_meta['lot_id']}"
             
@@ -413,7 +406,9 @@ class DataAnalysisApp(tk.Tk):
                         b_data.append(vals)
                         a_labels.append(self.raw_files_data[fn]['ro'])
                         b_cols.append(base_colors[f_idx % len(base_colors)])
-                        stats.append(f"[{self.raw_files_data[fn]['ro']}]\nAvg:{np.mean(vals):.1f}\nStd:{np.std(vals):.1f}")
+                        stats.append(f"[{self.raw_files_data[fn]['ro']}]
+Avg:{np.mean(vals):.1f}
+Std:{np.std(vals):.1f}")
             
             if b_data: box_plots_meta.append({'title': f"{param} Dist", 'b_data': b_data, 'a_labels': a_labels, 'b_cols': b_cols, 'stats': stats})
 
@@ -452,7 +447,6 @@ class DataAnalysisApp(tk.Tk):
                             sc = ax.scatter(xi, yi, color=ci, marker=mi, s=55 if mi=='^' else 35, zorder=3, picker=3)
                             sc.__dict__['metadata'] = {'group_key': g_key, 'param': m['param'], 'unit': xi, 'ro': ro_lbl}
                     
-                    # 그래프 메인 제목 적용 규칙 반영 (신뢰성 항목 이름 및 Lot 번호 포함)
                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=9, weight='bold')
                     ax.set_xticks(range(len(m['all_samples'])))
                     ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=7)
@@ -561,7 +555,8 @@ class DataAnalysisApp(tk.Tk):
             try:
                 with open(path, 'a'): pass
             except IOError:
-                messagebox.showerror("수정 불가", "동일한 이름의 PDF 리포트 파일이 열려 있습니다.\n닫고 다시 시도하세요.")
+                messagebox.showerror("수정 불가", "동일한 이름의 PDF 리포트 파일이 열려 있습니다.
+닫고 다시 시도하세요.")
                 return
 
         pb = AutoClosingProgressPop(self, "PDF 리포트 저장 중")
@@ -578,9 +573,9 @@ class DataAnalysisApp(tk.Tk):
                         
                         if line_meta:
                             if self.data_mode == "Module":
-                                cols, rows, items_per_page = 3, 3, 9  # Module 모드: 1page에 3*3
+                                cols, rows, items_per_page = 3, 3, 9  
                             else:
-                                cols, rows, items_per_page = 1, 3, 3  # Discrete 모드: 1줄에 1개씩 총 3줄 1page
+                                cols, rows, items_per_page = 1, 3, 3  
                             
                             for i in range(0, len(line_meta), items_per_page):
                                 chunk = line_meta[i:i+items_per_page]
@@ -630,7 +625,9 @@ class DataAnalysisApp(tk.Tk):
                                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=8, weight='bold')
                                     ax.grid(True, alpha=0.3)
                                     
-                                    stat_str = "\n".join([s.replace('\n', ' ') for s in m['stats']])
+                                    stat_str = "
+".join([s.replace('
+', ' ') for s in m['stats']])
                                     ax.text(0.05, -0.4, stat_str, transform=ax.transAxes, fontsize=5, verticalalignment='top')
                                 
                                 for idx in range(len(chunk), b_rows * b_cols): axes[idx // b_cols, idx % b_cols].axis('off')
@@ -641,7 +638,8 @@ class DataAnalysisApp(tk.Tk):
                 self.after(0, pb.update_progress, 100, 100, "완료")
                 self.after(300, lambda: messagebox.showinfo("Success", "지정하신 규칙 기반의 매칭 PDF 저장이 완료되었습니다."))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("PDF Export Error", f"PDF 컴파일 에러:\n{str(e)}"))
+                self.after(0, lambda: messagebox.showerror("PDF Export Error", f"PDF 컴파일 에러:
+{str(e)}"))
                 if pb.winfo_exists(): pb.destroy()
 
         threading.Thread(target=pdf_thread, daemon=True).start()
