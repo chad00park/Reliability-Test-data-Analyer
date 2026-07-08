@@ -8,36 +8,35 @@ on:
 
 jobs:
   build:
-    # 리눅스 환경 에러 및 크로스 컴파일 문제를 해결하기 위해 윈도우 서버 환경으로 변경합니다.
     runs-on: windows-latest
 
     steps:
-    # 1. 저장소 체크아웃 (최신 v4)
+    # 1. 저장소 체크아웃
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # 2. 파이썬 환경 설정 (최신 v5)
+    # 2. 파이썬 환경 설정
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-        cache: 'pip'
 
-    # 3. 엑셀 파싱 및 그래픽 구현에 필요한 필수 의존성 패키지 설치
+    # 3. 필수 패키지 일괄 설치
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pandas openpyxl matplotlib pyinstaller
 
-    # 4. PyInstaller를 이용한 단일 실행파일(.exe) 빌드
-    # (콘솔 창을 숨기고 하나의 파일로 깔끔하게 압축합니다)
+    # 4. PyInstaller 인코딩 우회 빌드
+    # (일반 cmd 대신 bash 컴파일러를 강제 지정하여 인코딩 유실로 인한 exit code 1을 차단합니다)
     - name: Build with PyInstaller
+      shell: bash
       run: |
-        pyinstaller --onefile --noconsole main.py
+        python -m PyInstaller --onefile --noconsole main.py
 
-    # 5. 빌드 완료된 .exe 결과물 업로드 (최신 v4 버전으로 경로 유실 차단)
+    # 5. 결과물 안전 업로드 (폴더 전체 지정으로 유실 방지)
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: DataAnalysisApp-Windows-exe
-        path: dist/main.exe
+        path: dist/
