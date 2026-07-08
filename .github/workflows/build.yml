@@ -23,9 +23,18 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Build EXE with PyInstaller
+    - name: Build EXE with PyInstaller (Optimized)
       run: |
-        pyinstaller --noconsole --onefile main.py
+        # --exclude-module: 무거운 미사용 라이브러리를 제외하여 무한 루프 및 빌드 지연 방지
+        # --clean: 빌드 전 캐시를 청소하여 꼬임 방지
+        pyinstaller --noconsole --onefile --clean `
+          --exclude-module notebook `
+          --exclude-module scipy `
+          --exclude-module PyQt5 `
+          --exclude-module PyQt6 `
+          --exclude-module PySide2 `
+          --exclude-module PySide6 `
+          main.py
 
     - name: Upload Artifact (Downloadable EXE)
       uses: actions/upload-artifact@v4
