@@ -63,7 +63,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v7.2")
+        self.title("Reliability Data Analyzer v8.0")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -97,8 +97,9 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
+        # 파일명에서 Lot 추출 (없으면 공통 그룹으로 묶이도록 처리)
         lot_match = re.search(r'(lot[\s_\-]*[a-zA-Z0-9]+)', filename, re.IGNORECASE)
-        lot_str = lot_match.group(1).upper().replace(" ", "").replace("_","").replace("-","") if lot_match else "UNKNOWN_LOT"
+        lot_str = lot_match.group(1).upper().replace(" ", "").replace("_","").replace("-","") if lot_match else "BATCH_LOT"
         
         ro_match = re.search(r'(\d+\s*(?:hr|cyc|min|sec|day|wk|month|r|t|step|st))', filename, re.IGNORECASE)
         if ro_match:
@@ -119,14 +120,6 @@ class DataAnalysisApp(tk.Tk):
         if pd.isna(s_id): return ""
         s_str = str(s_id).strip().replace(" ", "").replace(".0", "")
         return s_str
-
-    def fast_load_dataframe(self, path):
-        if path.endswith('.csv'):
-            try: return pd.read_csv(path, header=None, nrows=150, engine='c', on_bad_lines='skip')
-            except: return pd.read_csv(path, header=None, nrows=150, engine='python')
-        else:
-            try: return pd.read_excel(path, header=None, nrows=150)
-            except: return pd.read_excel(path, header=None, nrows=150, engine='openpyxl')
 
     def full_load_dataframe(self, path):
         if path.endswith('.csv'):
@@ -162,11 +155,12 @@ class DataAnalysisApp(tk.Tk):
         threading.Thread(target=target_thread, daemon=True).start()
 
     def process_files(self, files, pb):
-        df_s = self.fast_load_dataframe(files[0])
-        if df_s.empty: raise ValueError("선택한 첫 번째 파일 구조를 읽을 수 없습니다.")
+        # 1. 첫 번째 파일(마스터 파일) 구조 파싱
+        df_first = self.full_load_dataframe(files[0])
+        if df_first.empty: raise ValueError("선택한 첫 번째 파일 구조를 읽을 수 없습니다.")
             
         p_idx, u_idx, sample_start_row = None, None, None
-        for i, r in df_s.iterrows():
+        for i, r in df_first.iterrows():
             if r.empty or pd.isna(r.iloc[0]): continue
             val_first_col = str(r.iloc[0]).strip().lower().replace(" ", "")
             if "parameter" in val_first_col: p_idx = i
@@ -176,9 +170,13 @@ class DataAnalysisApp(tk.Tk):
         if p_idx is None or u_idx is None or sample_start_row is None: 
             raise ValueError("첫 번째 파일에서 'Parameter', 'Unit' 혹은 'Sample' 기준행 지시어를 찾을 수 없습니다.")
 
-        df_first_full = self.full_load_dataframe(files[0])
-        raw_p_master = df_first_full.iloc[p_idx, 1:].tolist()
-        raw_u_master = df_first_full.iloc[u_idx, 1:].tolist()
+        # 첫 번째 파일 기준으로 마스터 파라미터 및 마스터 시료 ID 리스트 확보
+        raw_p_master = df_first.iloc[p_idx, 1:].tolist()
+        raw_u_master = df_first.iloc[u_idx, 1:].tolist()
+        
+        # 첫 번째 파일의 1열에서 기준 시료명 마스터 생성
+        raw_master_units = df_first.iloc[sample_start_row + 1:, 0].tolist()
+        master_units = [self.clean_sample_id(u) for u in raw_master_units if self.clean_sample_id(u) != ""]
         
         master_param_names = []
         prefix = ""
@@ -204,34 +202,38 @@ class DataAnalysisApp(tk.Tk):
         temp_data, all_p, self.lot_groups = {}, set(), {}
         total_files = len(files)
         
+        # 2. 모든 파일 순회 (두 번째 파일부터는 첫 번째 파일의 행/열 인덱스를 그대로 적용)
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
             self.after(0, pb.update_progress, idx, total_files, f"데이터 파싱 매칭 중 ({idx+1}/{total_files})")
             
             lot, ro, ro_n = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
-            if df.empty or sample_start_row + 1 >= len(df): continue
-            
-            raw_units = df.iloc[sample_start_row + 1:, 0].tolist()
-            units = [self.clean_sample_id(u) for u in raw_units if self.clean_sample_id(u) != ""]
+            if df.empty: continue
             
             p_dict = {}
+            # 첫 번째 파일의 파라미터 맵을 순회하면서 동일 위치의 데이터 강제 매칭
             for c_idx, pn in enumerate(final_master_params):
                 if not pn or "cont_" in pn.lower(): continue
-                col_pos = c_idx + 1
+                col_pos = c_idx + 1  # 데이터가 들어있는 열 위치
                 if col_pos >= df.shape[1]: continue
                 
+                # 단위 정보 확인
                 un = ""
                 if u_idx < len(df):
                     un = str(df.iloc[u_idx, col_pos]).strip() if not pd.isna(df.iloc[u_idx, col_pos]) else ""
                 if not un and c_idx < len(raw_u_master):
                     un = str(raw_u_master[c_idx]).strip() if not pd.isna(raw_u_master[c_idx]) else ""
                 
+                # 데이터 값 추출 (지시어가 없는 두 번째 파일 이후도 동일 행 위치에서 추출)
                 vals = pd.to_numeric(df.iloc[sample_start_row + 1:, col_pos], errors='coerce').tolist()
-                vals = vals[:len(units)]
                 
-                if all(v is None or np.isnan(v) for v in vals): continue
-                p_dict[pn] = {'unit': un, 'values': vals, 'units_map': units[:len(vals)]}
+                # 중요: 데이터 개수가 마스터 시료 수와 다를 경우 길이를 맞춰줌
+                vals = vals[:len(master_units)]
+                if len(vals) < len(master_units):
+                    vals += [np.nan] * (len(master_units) - len(vals))
+                
+                p_dict[pn] = {'unit': un, 'values': vals, 'units_map': master_units}
                 all_p.add(pn)
             
             if lot in self.lot_groups and any(temp_data[f]['ro'] == ro for f in self.lot_groups[lot]):
@@ -399,6 +401,7 @@ class DataAnalysisApp(tk.Tk):
             for f_idx, fn in enumerate(lot_files):
                 if param in self.raw_files_data[fn]['params']:
                     p_info = self.raw_files_data[fn]['params'][param]
+                    # 마스터 시료 정보 기준으로 박스 플롯 생성
                     vals = [uy for ux, uy in zip(p_info['units_map'], p_info['values']) if uy is not None and not np.isnan(uy) and self.clean_sample_id(ux) not in del_set]
                     if vals:
                         b_data.append(vals)
@@ -566,12 +569,11 @@ class DataAnalysisApp(tk.Tk):
                         self.after(0, pb.update_progress, int((step/total_steps)*100), 100, f"[{lot_key}] 컴파일 중...")
                         line_meta, box_meta = self.build_chart_data_structures(lot_key)
                         
-                        # [요청사항 반영] Discrete / Module 모드별 라인 그래프 레이아웃 완벽 분기
                         if line_meta:
                             if self.data_mode == "Module":
                                 cols, rows, items_per_page = 3, 3, 9  # Module: 1페이지에 3x3=9개
                             else:
-                                cols, rows, items_per_page = 1, 3, 3  # Discrete: 1페이지에 1x3=3개 (시료수가 많으므로)
+                                cols, rows, items_per_page = 1, 3, 3  # Discrete: 1페이지에 1x3=3개
                             
                             for i in range(0, len(line_meta), items_per_page):
                                 chunk = line_meta[i:i+items_per_page]
@@ -595,7 +597,6 @@ class DataAnalysisApp(tk.Tk):
                                     by_label = dict(zip(labels, handles))
                                     if by_label: ax.legend(by_label.values(), by_label.keys(), loc="best", fontsize=5)
                                 
-                                # 빈 칸 서브플롯 숨김 처리
                                 for idx in range(len(chunk), rows * cols): 
                                     axes[idx // cols, idx % cols].axis('off')
                                     
@@ -603,7 +604,6 @@ class DataAnalysisApp(tk.Tk):
                                 pdf.savefig(fig, dpi=200)
                                 plt.close(fig)
                                 
-                        # Box plot은 discrete/module 상관없이 고정 정렬 배치 (가로 4개 x 세로 2개 = 1페이지당 8개)
                         if box_meta:
                             b_cols, b_items_per_page = 4, 8
                             for i in range(0, len(box_meta), b_items_per_page):
@@ -632,7 +632,7 @@ class DataAnalysisApp(tk.Tk):
                                 plt.close(fig)
                                 
                 self.after(0, pb.update_progress, 100, 100, "완료")
-                self.after(300, lambda: messagebox.showinfo("Success", f"선택하신 모드({self.data_mode}) 맞춤형 레이아웃 PDF 저장이 완료되었습니다."))
+                self.after(300, lambda: messagebox.showinfo("Success", f"맞춤형 레이아웃 PDF 저장이 완료되었습니다."))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("PDF Export Error", f"PDF 컴파일 에러:\n{str(e)}"))
                 if pb.winfo_exists(): pb.destroy()
