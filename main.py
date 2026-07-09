@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v10.0 - [Super Parsing Engine]")
+        self.title("Reliability Data Analyzer v11.0 - [Plus Premium Engine]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -158,37 +158,41 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"고성능 시트 파싱 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"정밀 마스터 스캔 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
             if df.empty: continue
             
-            # --- [정밀 텍스트 전수 조사 시스템 가동] ---
+            # --- [실제 원본 대응 2단계 자동 검색 가동] ---
             p_name_row_idx = None
             unit_row_idx = None
             test_no_row_idx = None
             start_col_idx = None
             
-            for i in range(len(df)):
-                row_list = [str(x).strip().lower().replace(" ", "").replace("_", "").replace("-", "") for x in df.iloc[i].tolist()]
+            # 가이드 1: 상단 헤더 라인 찾기 (T1, T2 지시어 및 Unit 검색)
+            for i in range(min(50, len(df))):
+                row_list_clean = [str(x).strip().lower().replace(" ", "") for x in df.iloc[i].tolist()]
                 
-                # 1) 시료 번호 위치 유연 탐색
-                if any("testno" in x for x in row_list):
-                    test_no_row_idx = i
-                
-                # 2) 단위 행 위치 유연 탐색
-                if "unit" in row_list:
+                if "unit" in row_list_clean:
                     unit_row_idx = i
-                    
-                # 3) T1 헤더 기반 파라미터 행 유연 탐색
-                for c_idx, cell_str in enumerate(row_list):
-                    if re.match(r'^t1$', cell_str):
-                        p_name_row_idx = i + 1  # 지시어 바로 다음 행
-                        if start_col_idx is None:
+                
+                if any(re.match(r'^t1$', x) for x in row_list_clean):
+                    p_name_row_idx = i + 1  # T1 바로 다음 줄이 이름 행
+                    for c_idx, c_val in enumerate(row_list_clean):
+                        if "t1" in c_val:
                             start_col_idx = c_idx
+                            break
 
-            # [백업 안전장치 가동]: 탐색이 안되면 지정해주신 물리 고정 인덱스(20행, 27행, 47행)를 기본 스펙으로 강제 매칭
+            # 가이드 2: 실제 시료 데이터 시작 위치 찾기 (0열이 순수 숫자인 행 역추적)
+            # 19번 행 근처의 가짜 숫자를 거르기 위해 30번 행 이후부터 검사하여 안정성 확보
+            for i in range(30, len(df)):
+                val_0 = str(df.iloc[i, 0]).strip()
+                if val_0.isdigit() and int(val_0) >= 1:
+                    test_no_row_idx = i
+                    break
+
+            # 예외 예방 백업 디폴트 좌표 (A, B, C 시트 크로스 체크 매칭값)
             if p_name_row_idx is None: p_name_row_idx = 19
             if unit_row_idx is None: unit_row_idx = 26
             if test_no_row_idx is None: test_no_row_idx = 46
@@ -196,9 +200,19 @@ class DataAnalysisApp(tk.Tk):
 
             if test_no_row_idx >= len(df): continue
             
-            # 시료 식별값 안정 추출
-            raw_units = df.iloc[test_no_row_idx + 1:, 0].tolist()
-            units = [str(u).strip().replace(".0", "") for u in raw_units if pd.notna(u) and str(u).strip() != ""]
+            # 시료 유효 넘버링 슬라이싱 추출 (문자열 미세 노이즈 전처리)
+            units = []
+            data_end_row = test_no_row_idx
+            for i in range(test_no_row_idx, len(df)):
+                v0 = str(df.iloc[i, 0]).strip().replace(".0", "")
+                if v0.isdigit():
+                    units.append(v0)
+                    data_end_row = i + 1
+                else:
+                    # 중간에 빈칸이나 요약 정보가 나오면 시료 종료로 인식
+                    if len(units) > 0 and v0 == "":
+                        break
+            
             num_samples = len(units)
             if num_samples == 0: continue
             
@@ -206,12 +220,13 @@ class DataAnalysisApp(tk.Tk):
             cont_prefix = ""
             max_cols = df.shape[1]
             
+            # 파라미터 컬럼 분석 루프 가동
             for col_idx in range(start_col_idx, max_cols):
                 if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df):
                     continue
                 
                 p_name_raw = str(df.iloc[p_name_row_idx, col_idx]).strip()
-                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test"]: 
+                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test", "'", "color"]: 
                     continue
                 
                 if self.data_mode == "Module":
@@ -220,12 +235,12 @@ class DataAnalysisApp(tk.Tk):
                         cont_prefix = p_name_raw.upper().split('_')[1]
                         continue
                 
-                # 중복 제어 확장 서브네임 매칭 (아래 3번째 행)
+                # 중복 방지 조합 명명법 (이름 행 기준 아래 3번째 줄 조건 결합)
                 sub_name_idx = p_name_row_idx + 3 
                 p_name_final = p_name_raw
                 if sub_name_idx < len(df):
                     sub_val = str(df.iloc[sub_name_idx, col_idx]).strip()
-                    if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan" and sub_val != "0":
+                    if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan" and sub_val != "0" and sub_val != "'":
                         sub_val_clean = re.sub(r'[\s]+', '', sub_val)
                         if sub_val_clean and not sub_val_clean.replace('.','').isdigit():
                             p_name_final = f"{p_name_raw}_{sub_val_clean}"
@@ -233,15 +248,16 @@ class DataAnalysisApp(tk.Tk):
                 if self.data_mode == "Module" and cont_prefix:
                     p_name_final = f"{cont_prefix}_{p_name_final}"
                 
-                # 단위값 백업 방어 처리
-                unit_val = str(df.iloc[unit_row_idx, col_idx]).strip()
+                # 단위 예외 처리 (원인 2번 해결: 작은따옴표만 있거나 공백인 경우 대시 치환)
+                unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
                 if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
                     unit_val = "-"  
                 
-                # 데이터 값 파싱 (문자 데이터는 공란 우회)
-                raw_vals = df.iloc[test_no_row_idx + 1 : test_no_row_idx + 1 + num_samples, col_idx].tolist()
+                # 데이터 값 수집 및 타입 컨버팅 (비수치 기호는 자동으로 NaN 처리)
+                raw_vals = df.iloc[test_no_row_idx : data_end_row, col_idx].tolist()
                 vals = pd.to_numeric(raw_vals, errors='coerce').tolist()
                 
+                # 데이터가 전부 공란인 열만 아니라면 매칭 사전에 탑재
                 if not all(v is None or np.isnan(v) for v in vals):
                     p_dict[p_name_final] = {'unit': unit_val, 'values': vals, 'units_map': units}
                     all_p.add(p_name_final)
@@ -254,7 +270,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(fname)
 
         if not all_p: 
-            raise ValueError("파일 내에 유효한 데이터 열 정보가 발견되지 않았습니다. 선택한 데이터 유형(Discrete/Module) 혹은 시트 양식을 확인해 주세요.")
+            raise ValueError("업로드하신 실제 CSV 파일 구조 내에서 유효한 시료 데이터 매칭에 실패했습니다.\n파일 손상 여부나 데이터 양식을 확인해주세요.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
