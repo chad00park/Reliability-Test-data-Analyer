@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v12.0 - [Master File Mapping Engine]")
+        self.title("Reliability Data Analyzer v13.0 - [Multi Read-out Overlay Engine]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -116,6 +116,7 @@ class DataAnalysisApp(tk.Tk):
         tokens = [t for t in rem.split(' ') if t and not t.isdigit()]
         test_item = tokens[0].upper() if tokens else "RELIABILITY_TEST"
         
+        # 그래프를 누적할 메인 그룹 키 조합: "신뢰성항목_LOT번호"
         group_key = f"{test_item}_{lot_str}"
         return group_key, ro_str, ro_num, test_item, lot_str
 
@@ -156,163 +157,124 @@ class DataAnalysisApp(tk.Tk):
         temp_data, all_p, self.lot_groups = {}, set(), {}
         total_files = len(files)
         
-        # 1단계: 파일명 정보를 먼저 분리하여 항목별(group_key)로 정렬 및 그룹화 수행
-        pre_groups = {}
-        for path in files:
+        # 모든 파일을 각각 독립적으로 스캔 (1번 요구사항 반영)
+        for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            g_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
-            if g_key not in pre_groups:
-                pre_groups[g_key] = []
-            pre_groups[g_key].append({'path': path, 'fname': fname, 'ro': ro, 'ro_num': ro_n, 'test_item': test_item, 'lot_id': lot_id})
+            self.after(0, pb.update_progress, idx, total_files, f"파일 개별 파싱 중 ({idx+1}/{total_files})")
             
-        # 각 항목군 내에서 첫 Read-out 파일(보통 0hr)이 가장 앞으로 오도록 정렬
-        for g_key in pre_groups:
-            pre_groups[g_key].sort(key=lambda x: x['ro_num'])
-
-        # 2단계: 각 신뢰성 항목별 첫 번째 파일을 마스터로 삼아 데이터 스캔 진행
-        for g_key, file_list in pre_groups.items():
-            master_meta = None  # 첫 번째 파일에서 추출할 마스터 구조 정보 저장소
+            group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
+            df = self.full_load_dataframe(path)
+            if df.empty: continue
             
-            for f_idx, f_info in enumerate(file_list):
-                path = f_info['path']
-                fname = f_info['fname']
-                ro = f_info['ro']
-                ro_n = f_info['ro_num']
-                test_item = f_info['test_item']
-                lot_id = f_info['lot_id']
+            p_name_row_idx = None
+            unit_row_idx = None
+            test_no_row_idx = None
+            start_col_idx = None
+            
+            # 파일별 1열(0번 열) 지시어 독립 스캔 검색
+            for i in range(min(60, len(df))):
+                col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
                 
-                self.after(0, pb.update_progress, len(temp_data), total_files, f"마스터 맵 매칭 분석 중 ({fname})")
-                df = self.full_load_dataframe(path)
-                if df.empty: continue
-                
-                # [요청 규칙 반영]: 신뢰성 항목별 첫 파일(f_idx == 0)에서만 완벽한 위치 구조를 학습
-                if f_idx == 0 or master_meta is None:
-                    p_name_row_idx = None
-                    unit_row_idx = None
-                    test_no_row_idx = None
-                    start_col_idx = None
+                if "parameter" in col0_str:
+                    p_name_row_idx = i + 1  # Parameter 바로 한 줄 아래 행
+                    for c_idx in range(df.shape[1]):
+                        if re.match(r'^t1$', str(df.iloc[i, c_idx]).strip(), re.IGNORECASE):
+                            start_col_idx = c_idx
+                            break
+                            
+                if "unit" in col0_str:
+                    unit_row_idx = i
                     
-                    # 1열(0번 열)을 훑으며 핵심 지시어 검색
-                    for i in range(min(60, len(df))):
-                        col0_str = str(df.iloc[i, 0]).strip().replace(" ", "")
+                if "testno" in col0_str:
+                    test_no_row_idx = i
+
+            # 탐색 실패 시 기본 고정 픽셀 백업 매칭 가동
+            if p_name_row_idx is None: p_name_row_idx = 19
+            if unit_row_idx is None: unit_row_idx = 26
+            if test_no_row_idx is None: test_no_row_idx = 46
+            if start_col_idx is None: start_col_idx = 7
+
+            if test_no_row_idx >= len(df): continue
+            
+            # 시료 번호 독립 추출
+            units = []
+            data_row_positions = []
+            for i in range(test_no_row_idx + 1, len(df)):
+                v0 = str(df.iloc[i, 0]).strip().replace(".0", "")
+                if v0.isdigit():
+                    units.append(v0)
+                    data_row_positions.append(i)
+                else:
+                    if len(units) > 0 and v0 == "":
+                        break
                         
-                        if "parameter" in col0_str.lower():
-                            # Parameter 지시어 행 바로 한 줄 아래가 실제 파라미터 이름 행
-                            p_name_row_idx = i + 1
-                            # 오른쪽으로 가면서 T1이 처음 등장하는 열 인덱스 추적
-                            for c_idx in range(df.shape[1]):
-                                if re.match(r'^t1$', str(df.iloc[i, c_idx]).strip(), re.IGNORECASE):
-                                    start_col_idx = c_idx
-                                    break
-                                    
-                        if "unit" in col0_str.lower():
-                            unit_row_idx = i
-                            
-                        if "testno." in col0_str.lower() or "testno" in col0_str.lower():
-                            test_no_row_idx = i
-
-                    # 동적 검색 실패 시 차선책 백업 좌표 할당
-                    if p_name_row_idx is None: p_name_row_idx = 19
-                    if unit_row_idx is None: unit_row_idx = 26
-                    if test_no_row_idx is None: test_no_row_idx = 46
-                    if start_col_idx is None: start_col_idx = 7
-
-                    # 1열의 Test No. 아래쪽으로 순수 숫자(시료 번호) 리스트 파싱
-                    units = []
-                    data_row_positions = []
-                    for i in range(test_no_row_idx + 1, len(df)):
-                        v0 = str(df.iloc[i, 0]).strip().replace(".0", "")
-                        if v0.isdigit():
-                            units.append(v0)
-                            data_row_positions.append(i)
-                        else:
-                            if len(units) > 0 and v0 == "":
-                                break # 데이터 영역 종료
-                                
-                    if len(units) == 0: continue
-                    
-                    # 마스터 정보 사전 구축 (다음 파일들이 공유할 좌표 정의)
-                    master_meta = {
-                        'p_name_row': p_name_row_idx,
-                        'unit_row': unit_row_idx,
-                        'start_col': start_col_idx,
-                        'units': units,
-                        'row_positions': data_row_positions
-                    }
+            if len(units) == 0: continue
+            
+            p_dict = {}
+            cont_prefix = ""
+            max_cols = df.shape[1]
+            
+            # 현재 파일 내 파라미터 열 전체 추출 및 유연 매칭
+            for col_idx in range(start_col_idx, max_cols):
+                if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df):
+                    continue
                 
-                # --- [첫 파일에서 학습된 마스터 정보 기반으로 데이터 추출 진행] ---
-                p_dict = {}
-                cont_prefix = ""
+                p_name_raw = str(df.iloc[p_name_row_idx, col_idx]).strip()
+                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test", "'", "color"]: 
+                    continue
                 
-                m_p_row = master_meta['p_name_row']
-                m_u_row = master_meta['unit_row']
-                m_start_col = master_meta['start_col']
-                m_units = master_meta['units']
-                m_rows = master_meta['row_positions']
-                
-                max_cols = df.shape[1]
-                
-                for col_idx in range(m_start_col, max_cols):
-                    # 다음 파일들에 지시어가 없더라도 마스터의 고정 열 번호를 통해 안전하게 접근
-                    if col_idx >= max_cols or m_p_row >= len(df) or m_u_row >= len(df):
+                if self.data_mode == "Module":
+                    if "scan" in p_name_raw.lower(): continue
+                    if p_name_raw.upper().startswith("CONT_"):
+                        cont_prefix = p_name_raw.upper().split('_')[1]
                         continue
-                    
-                    # 파라미터명은 첫 파일의 이름 위치 기준 참조
-                    p_name_raw = str(df.iloc[m_p_row, col_idx]).strip()
-                    if pd.isna(df.iloc[m_p_row, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test", "'", "color"]: 
-                        continue
-                    
-                    if self.data_mode == "Module":
-                        if "scan" in p_name_raw.lower(): continue
-                        if p_name_raw.upper().startswith("CONT_"):
-                            cont_prefix = p_name_raw.upper().split('_')[1]
-                            continue
-                    
-                    # 중복 방지를 위한 아래 3번째 줄 조건 결합
-                    sub_name_idx = m_p_row + 3
-                    p_name_final = p_name_raw
-                    if sub_name_idx < len(df):
-                        sub_val = str(df.iloc[sub_name_idx, col_idx]).strip()
-                        if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan" and sub_val != "0" and sub_val != "'":
-                            sub_val_clean = re.sub(r'[\s]+', '', sub_val)
-                            if sub_val_clean and not sub_val_clean.replace('.','').isdigit():
-                                p_name_final = f"{p_name_raw}_{sub_val_clean}"
-                    
-                    if self.data_mode == "Module" and cont_prefix:
-                        p_name_final = f"{cont_prefix}_{p_name_final}"
-                    
-                    # 단위 정제 처리
-                    unit_val = str(df.iloc[m_u_row, col_idx]).strip().replace("'", "")
-                    if pd.isna(df.iloc[m_u_row, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
-                        unit_val = "-"
-                    
-                    # 마스터 시료 행 좌표 목록을 사용하여 정확하게 수치 데이터만 매핑 추출
-                    vals = []
-                    for r_pos in m_rows:
-                        if r_pos < len(df):
-                            vals.append(df.iloc[r_pos, col_idx])
-                        else:
-                            vals.append(np.nan)
-                            
-                    vals = pd.to_numeric(vals, errors='coerce').tolist()
-                    
-                    if not all(v is None or np.isnan(v) for v in vals):
-                        p_dict[p_name_final] = {'unit': unit_val, 'values': vals, 'units_map': m_units}
-                        all_p.add(p_name_final)
                 
-                if p_dict:
-                    if g_key in self.lot_groups and any(temp_data[f]['ro'] == ro for f in self.lot_groups[g_key]):
-                        ro = f"{ro}_{len(temp_data)}"
-                    temp_data[fname] = {'lot_key': g_key, 'ro': ro, 'ro_num': ro_n, 'params': p_dict, 'test_item': test_item, 'lot_id': lot_id}
-                    if g_key not in self.lot_groups: self.lot_groups[g_key] = []
-                    self.lot_groups[g_key].append(fname)
+                # 중복 방지 조합 명명법 (3번째 아래 행 조건 검사 및 결합)
+                sub_name_idx = p_name_row_idx + 3
+                p_name_final = p_name_raw
+                if sub_name_idx < len(df):
+                    sub_val = str(df.iloc[sub_name_idx, col_idx]).strip()
+                    if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan" and sub_val != "0" and sub_val != "'":
+                        sub_val_clean = re.sub(r'[\s]+', '', sub_val)
+                        if sub_val_clean and not sub_val_clean.replace('.','').isdigit():
+                            p_name_final = f"{p_name_raw}_{sub_val_clean}"
+                
+                if self.data_mode == "Module" and cont_prefix:
+                    p_name_final = f"{cont_prefix}_{p_name_final}"
+                
+                # 단위 처리
+                unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
+                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
+                    unit_val = "-"
+                
+                # 시료별 데이터 값 파싱
+                vals = []
+                for r_pos in data_row_positions:
+                    if r_pos < len(df):
+                        vals.append(df.iloc[r_pos, col_idx])
+                    else:
+                        vals.append(np.nan)
+                vals = pd.to_numeric(vals, errors='coerce').tolist()
+                
+                if not all(v is None or np.isnan(v) for v in vals):
+                    p_dict[p_name_final] = {'unit': unit_val, 'values': vals, 'units_map': units}
+                    all_p.add(p_name_final)
+            
+            if p_dict:
+                # 중요: 파일 고유 키 생성 시 중복 유실 방지
+                unique_fname_key = f"{fname}_{idx}"
+                temp_data[unique_fname_key] = {'lot_key': group_key, 'ro': ro, 'ro_num': ro_n, 'params': p_dict, 'test_item': test_item, 'lot_id': lot_id}
+                if group_key not in self.lot_groups: 
+                    self.lot_groups[group_key] = []
+                self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("모든 파일의 마스터 스캔 병합 연산 결과 유효한 파라미터 데이터를 추출하지 못했습니다.")
+            raise ValueError("파일 내에서 조건에 부합하는 유효한 파라미터 데이터를 추출하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
         
+        # 차트 그룹 내의 모든 Read-out 파일들을 순서대로(0hr, 100hr, 500hr...) 정렬
         for g_key in self.lot_groups:
             self.lot_groups[g_key].sort(key=lambda x: self.raw_files_data[x]['ro_num'])
             f_meta = self.raw_files_data[self.lot_groups[g_key][0]]
@@ -350,7 +312,7 @@ class DataAnalysisApp(tk.Tk):
         tk.Button(btn_f, text="그래프 그리기", bg="#107c41", fg="white", font=("맑은 고딕", 10, "bold"), 
                   command=lambda: self.run_with_progress_pop("그래프 화면 렌더링 중", self.update_selections_and_render)).pack(side=tk.LEFT, padx=5)
         
-        c = tk.Frame(self); c.pack(fill=Twin.BOTH if 'Twin' in locals() else tk.BOTH, expand=True)
+        c = tk.Frame(self); c.pack(fill=tk.BOTH, expand=True)
         self.canvas = tk.Canvas(c, highlightthickness=0)
         self.scrollable_frame = tk.Frame(self.canvas)
         sb_v = ttk.Scrollbar(c, orient="vertical", command=self.canvas.yview); sb_v.pack(side=tk.RIGHT, fill=tk.Y)
@@ -386,7 +348,7 @@ class DataAnalysisApp(tk.Tk):
 
     def build_chart_data_structures(self, target_group_key):
         lot_files = self.lot_groups[target_group_key]
-        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#e31a1c', '#33a02c', '#fdbf6f', '#cab2d6', '#6a3d9a']
         
         line_plots_meta = []
         box_plots_meta = []
@@ -401,6 +363,7 @@ class DataAnalysisApp(tk.Tk):
             master_map = {} 
             all_samples_set = set()
 
+            # 차트 그룹 내의 모든 Read-out 파일들을 순회하면서 데이터를 누적 (2번 요구사항 해결 핵심)
             for filename in lot_files:
                 if param not in self.raw_files_data[filename]['params']: continue
                 p_info = self.raw_files_data[filename]['params'][param]
@@ -430,6 +393,7 @@ class DataAnalysisApp(tk.Tk):
             del_set = self.deleted_units.get((target_group_key, param), set())
             lines_dataset = []
 
+            # 모든 시간대(Read-out)가 겹쳐서 그래프에 표현되도록 데이터셋 추가
             for f_idx, filename in enumerate(lot_files):
                 ro_lbl = self.raw_files_data[filename]['ro']
                 px, py, pc, pm = [], [], [], []
@@ -463,6 +427,7 @@ class DataAnalysisApp(tk.Tk):
             b_data, a_labels, b_cols, stats = [], [], [], []
             del_set = self.deleted_units.get((target_group_key, param), set())
 
+            # Box plot 역시 모든 시간대(Read-out)가 가로로 차례대로 나열되어 한눈에 보임
             for f_idx, fn in enumerate(lot_files):
                 if param in self.raw_files_data[fn]['params']:
                     p_info = self.raw_files_data[fn]['params'][param]
