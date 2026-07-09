@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v18.0 - [Plus Absolute Suite]")
+        self.title("Reliability Data Analyzer v19.0 - [Pure Filename Engine]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -79,8 +79,6 @@ class DataAnalysisApp(tk.Tk):
         self.deleted_units = {}    
         self.undo_stack = []       
         self.is_delta_mode = tk.BooleanVar(value=False)
-        
-        # 개별 차트 축 범위를 기억할 딕셔너리 데이터베이스 캐시 가동
         self.individual_limits = {}
 
     def center_window(self, win, w, h):
@@ -100,26 +98,26 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
+        # [핵심 변경]: 내부 데이터를 일절 보지 않고 오직 겉으로 보이는 'filename' 자체만 뜯어서 분석합니다.
         name_we = os.path.splitext(filename)[0].upper()
+        tokens = [t.strip() for t in re.split(r'[\s_\-]+', name_we) if t.strip()]
         
-        # [요청 규칙 3 기반 버그 완벽 척결]: 마스터 키워드 패턴 정의
         rel_keywords = [
             "D-H3TRB", "H3TRB", "HTGB+", "HTGB-", "HTGB", "HTRB", "THBT", "THB", "THU", 
             "UHAST", "HAST", "TST", "PCT", "HTOL", "LTSL", "HTSL", "HTFS", "HTFB",
-            "IOL", "VIB", "DGS", "DRB", "HTS", "LTS", "VIB", "MS", "PC", "PRECON", "TC"
+            "IOL", "VIB", "DGS", "DRB", "HTS", "LTS", "MS", "PC", "PRECON", "TC"
         ]
         
-        # 1. 신뢰성 이름 추출
+        # 1. 순수 파일명 토큰에서 신뢰성 이름 추출
         test_item = "RELIABILITY_TEST"
         for kw in rel_keywords:
-            if kw in name_we:
+            if kw in tokens:
                 test_item = kw
                 break
-        if test_item == "RELIABILITY_TEST":
-            tokens = [x for x in re.split(r'[\s_\-]+', name_we) if x]
-            test_item = tokens[0] if tokens else "RELIABILITY_TEST"
+        if test_item == "RELIABILITY_TEST" and tokens:
+            test_item = tokens[0]
             
-        # 2. Read-out 파트 검출
+        # 2. 순수 파일명 토큰에서 Read-out 시간대 추출
         ro_str = "0HR"
         ro_num = 0
         ro_match = re.search(r'(\d+\s*(?:HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST))', name_we, re.IGNORECASE)
@@ -127,26 +125,23 @@ class DataAnalysisApp(tk.Tk):
             ro_str = ro_match.group(1).upper().replace(" ", "")
             ro_num = int(re.findall(r'\d+', ro_str)[0])
         else:
-            tokens = [x for x in re.split(r'[\s_\-]+', name_we) if x]
             for t in tokens:
                 digits = re.findall(r'\d+', t)
-                if digits and t != test_item and len(t) < 6:
+                if digits and t != test_item:
                     ro_num = int(digits[0])
                     ro_str = f"{ro_num}HR"
                     break
                     
-        # 3. LOT 번호 명밀 도출 알고리즘 (3T 노이즈 파쇄)
+        # 3. 신뢰성 이름과 시간대를 제외한 나머지 토큰을 LOT 번호로 지정 ('3T' 버그 원천 봉쇄)
+        lot_tokens = [t for t in tokens if t != test_item and t != ro_str]
         lot_str = "UNKNOWN_LOT"
-        lot_match = re.search(r'(LOT\d+)', name_we)
-        if lot_match:
-            lot_str = lot_match.group(1)
-        else:
-            # 보조 수단으로 파일 내 포함 단어 조합 적용
-            tokens = [x for x in re.split(r'[\s_\-]+', name_we) if x]
-            candidates = [t for t in tokens if t != test_item and t != ro_str and "2026" not in t and "2025" not in t]
-            if candidates:
-                lot_str = candidates[-1]
-                
+        for lt in lot_tokens:
+            if "LOT" in lt:
+                lot_str = lt
+                break
+        if lot_str == "UNKNOWN_LOT" and lot_tokens:
+            lot_str = "_".join(lot_tokens)
+            
         group_key = f"{test_item}_{lot_str}"
         return group_key, ro_str.lower(), ro_num, test_item, lot_str
 
@@ -189,7 +184,7 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"파일 독립 전수 파싱 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"파일 파싱 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
@@ -287,7 +282,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("단위가 존재하는 유효한 파라미터 데이터를 하나도 추출하지 못했습니다.")
+            raise ValueError("단위가 존재하는 유효한 파라미터 데이터를 추출하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -343,26 +338,6 @@ class DataAnalysisApp(tk.Tk):
         self.canvas.bind_all("<MouseWheel>", self._on_mouse_wheel)
         
         self.run_with_progress_pop("초기 그래프 로딩 중", self.update_selections_and_render)
-
-    def run_with_progress_pop(self, title_text, target_func):
-        pb = AutoClosingProgressPop(self, title_text)
-        def run():
-            self.after(50, lambda: pb.update_progress(30, 100, "데이터 정렬 중..."))
-            self.after(150, lambda: pb.update_progress(60, 100, "행렬 매칭 연산 중..."))
-            target_func()
-            self.after(250, lambda: pb.update_progress(100, 100, "완료되었습니다!"))
-        threading.Thread(target=run, daemon=True).start()
-
-    def _on_mouse_wheel(self, event):
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    def update_selections_and_render(self):
-        selections = self.param_listbox.curselection()
-        sel_items = [self.param_listbox.get(i) for i in selections]
-        if "★ 전체 선택" in sel_items: self.selected_parameters = self.parameter_list.copy()
-        else: self.selected_parameters = [v for v in sel_items if v != "★ 전체 선택"]
-        if not self.selected_parameters: return
-        self.execute_ui_rendering()
 
     def build_chart_data_structures(self, target_group_key):
         lot_files = self.lot_groups[target_group_key]
@@ -492,7 +467,7 @@ class DataAnalysisApp(tk.Tk):
                     cell = tk.Frame(grid_frame, bd=1, relief=tk.RIDGE, bg="white")
                     cell.grid(row=idx//cols, column=idx%cols, padx=4, pady=4, sticky="nsew")
                     
-                    # [요청 규칙 1 반영]: 개별 조절 UI 폼 상단 추가
+                    # [요청 규칙 1]: 개별 조절 UI 폼 상단 추가
                     input_f = tk.Frame(cell, bg="white")
                     input_f.pack(fill=tk.X, padx=5, pady=2)
                     tk.Label(input_f, text=f"Y축 범위:", bg="white", font=("맑은 고딕", 8)).pack(side=tk.LEFT)
@@ -508,7 +483,6 @@ class DataAnalysisApp(tk.Tk):
                     
                     fig, ax = plt.subplots(figsize=(4.2 if cols==3 else 13.0, 3.4))
                     
-                    # 수동 제어 한계값 매칭 가동
                     if cur_lim["min"] != "": ax.set_ylim(bottom=float(cur_lim["min"]))
                     if cur_lim["max"] != "": ax.set_ylim(top=float(cur_lim["max"]))
                     
@@ -545,7 +519,7 @@ class DataAnalysisApp(tk.Tk):
                     bb = tk.Frame(box_frame, bd=1, relief=tk.GROOVE, bg="white")
                     bb.grid(row=idx//4, column=idx%4, padx=5, pady=5, sticky="nsew")
                     
-                    # [요청 규칙 1 반영]: 개별 조절 UI 폼 박스에도 연동 구축
+                    # 개별 조절 UI 폼 박스 연동
                     input_f = tk.Frame(bb, bg="white")
                     input_f.pack(fill=tk.X, padx=5, pady=2)
                     tk.Label(input_f, text=f"Y축 범위:", bg="white", font=("맑은 고딕", 8)).pack(side=tk.LEFT)
@@ -576,7 +550,7 @@ class DataAnalysisApp(tk.Tk):
                     
                     ax_stat.axis('off')
                     
-                    # [요청 규칙 1 개정]: 세로방향 1set(Min->Max->AVG->STD) 완벽 정렬 수하 배치
+                    # [요청 규칙 1]: 세로방향 1set(Min->Max->AVG->STD) 수직 배치 정렬
                     for b_idx, s in enumerate(m['stats_data']):
                         x_pos = b_idx + 1
                         stat_text = f"[{s['ro']}]\nMin:{s['min']:.2f}\nMax:{s['max']:.2f}\nAVG:{s['avg']:.2f}\nSTD:{s['std']:.2f}"
@@ -713,7 +687,7 @@ class DataAnalysisApp(tk.Tk):
                                 plt.close(fig)
                                 
                         if box_meta:
-                            # [요청 규칙 2 반영]: 무조건 가로 4 * 세로 3 = 12개 템플릿 크기 고정화 가동
+                            # [요청 규칙 2]: 무조건 4개 * 3줄 = 12개 픽스 페이지 그리드 컴파일
                             b_cols, b_rows, b_items_per_page = 4, 3, 12
                             for i in range(0, len(box_meta), b_items_per_page):
                                 chunk = box_meta[i:i+b_items_per_page]
