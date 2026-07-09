@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v15.0 - [Unified Discrete & Module Engine]")
+        self.title("Reliability Data Analyzer v17.0 - [Plus Inteligient Suite]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -79,6 +79,8 @@ class DataAnalysisApp(tk.Tk):
         self.deleted_units = {}    
         self.undo_stack = []       
         self.is_delta_mode = tk.BooleanVar(value=False)
+        self.y_min_var = tk.StringVar(value="")
+        self.y_max_var = tk.StringVar(value="")
 
     def center_window(self, win, w, h):
         win.update_idletasks()
@@ -97,25 +99,28 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
-        # 확장자를 뗀 순수 대문자 파일명 확보
         name_we = os.path.splitext(filename)[0].upper()
-        # 언더바나 대시, 공백을 기준으로 단어 토큰 분리
+        # 언더바, 대시, 공백 기준으로 토큰화
         tokens = [t.strip() for t in re.split(r'[\s_\-]+', name_we) if t.strip()]
         
-        # 1. 신뢰성 항목 추출 (가장 첫 번째 토큰)
-        test_item = tokens[0] if tokens else "RELIABILITY_TEST"
+        # [요청 규칙 2 반영]: 지능형 신뢰성 마스터 키워드 사전 선언
+        rel_keywords = [
+            "D-H3TRB", "H3TRB", "HTGB+", "HTGB-", "HTGB", "HTRB", "THBT", "THB", "THU", 
+            "UHAST", "HAST", "TST", "PCT", "HTOL", "LTSL", "HTSL", "HTFS", "HTFB",
+            "IOL", "VIB", "DGS", "DRB", "HTS", "LTS", "VIB", "MS", "PC", "PRECON", "TC"
+        ]
         
-        # 2. LOT 번호 추출 (가장 마지막 토큰 혹은 LOT 단어가 포함된 토큰)
-        lot_str = "UNKNOWN_LOT"
-        if tokens:
-            for t in reversed(tokens):
-                if "LOT" in t:
-                    lot_str = t
-                    break
-            if lot_str == "UNKNOWN_LOT":
-                lot_str = tokens[-1]
-                
-        # 3. Read-out 시간대 추출 (숫자+HR, 숫자+CYC 혹은 단독 숫자 매칭)
+        # 1. 신뢰성 이름 정밀 판별
+        test_item = "RELIABILITY_TEST"
+        for kw in rel_keywords:
+            if kw in tokens:
+                test_item = kw
+                break
+        if test_item == "RELIABILITY_TEST":
+            # 사전 탐색 실패 시 가장 첫 토큰 적용 백업
+            test_item = tokens[0] if tokens else "RELIABILITY_TEST"
+            
+        # 2. Read-out 시간/Cycle 정밀 판별
         ro_str = "0HR"
         ro_num = 0
         ro_match = re.search(r'(\d+\s*(?:HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST))', name_we, re.IGNORECASE)
@@ -123,15 +128,27 @@ class DataAnalysisApp(tk.Tk):
             ro_str = ro_match.group(1).lower().replace(" ", "")
             ro_num = int(re.findall(r'\d+', ro_str)[0])
         else:
-            # 포괄적인 숫자 패턴 검색 역추적
             for t in tokens:
                 digits = re.findall(r'\d+', t)
-                if digits and t != lot_str:
+                if digits and t != test_item and len(t) < 6:
                     ro_num = int(digits[0])
                     ro_str = f"{ro_num}HR"
                     break
                     
-        # Discrete 모드에서 파일이 쪼개지지 않도록 이어붙이는 핵심 웅장한 그룹화 키 생성
+        # 3. 순서와 관계없이 신뢰성 이름과 시간대를 제외한 핵심 파트를 조합하여 LOT 번호로 판정
+        lot_tokens = [t for t in tokens if t != test_item and t != ro_str.upper() and not re.match(r'^\d+(?:HR|CYC)$', t)]
+        
+        lot_str = "UNKNOWN_LOT"
+        for lt in lot_tokens:
+            if "LOT" in lt:
+                lot_str = lt
+                break
+        if lot_str == "UNKNOWN_LOT" and lot_tokens:
+            # LOT 기호가 안 보여도 남은 결합용 유효 문자열 매칭
+            lot_str = "_".join([x for x in lot_tokens if len(x) < 15]) # 긴 날짜 임시코드 제외 필터
+            if not lot_str: lot_str = lot_tokens[-1]
+            
+        # 최적화된 유니크 중첩 그룹화 차트 키 리턴
         group_key = f"{test_item}_{lot_str}"
         return group_key, ro_str, ro_num, test_item, lot_str
 
@@ -185,7 +202,6 @@ class DataAnalysisApp(tk.Tk):
             test_no_row_idx = None
             start_col_idx = None
             
-            # 파일별 1열 독립 검색 서치 가동
             for i in range(min(60, len(df))):
                 col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
                 if "parameter" in col0_str:
@@ -227,7 +243,6 @@ class DataAnalysisApp(tk.Tk):
                 if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df):
                     continue
                 
-                # 단위가 없는 항목은 과감히 연산에서 스킵(제외)
                 unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
                 if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
                     continue
@@ -267,7 +282,6 @@ class DataAnalysisApp(tk.Tk):
                     all_p.add(p_name_final)
             
             if p_dict:
-                # 파일 고유 연산 키 생성 규칙 분리화로 덮어쓰기 유실 완벽 보호
                 unique_fname_key = f"{fname}_{idx}"
                 temp_data[unique_fname_key] = {'lot_key': group_key, 'ro': ro, 'ro_num': ro_n, 'params': p_dict, 'test_item': test_item, 'lot_id': lot_id}
                 if group_key not in self.lot_groups: 
@@ -280,7 +294,6 @@ class DataAnalysisApp(tk.Tk):
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
         
-        # 각 차트 그룹 내의 모든 Read-out 파일들을 순서대로(0hr, 100hr, 500hr...) 중첩 정렬
         for g_key in self.lot_groups:
             self.lot_groups[g_key].sort(key=lambda x: self.raw_files_data[x]['ro_num'])
             f_meta = self.raw_files_data[self.lot_groups[g_key][0]]
@@ -296,13 +309,19 @@ class DataAnalysisApp(tk.Tk):
         ctrl_f = tk.LabelFrame(t, text="Analysis Control Panel", font=("맑은 고딕", 9, "bold"), bg="#f4f4f4", padx=10)
         ctrl_f.pack(side=tk.RIGHT, padx=10)
         
+        y_label_frame = tk.LabelFrame(ctrl_f, text="📊 Y축 범위 설정", font=("맑은 고딕", 8), bg="#f4f4f4")
+        y_label_frame.pack(side=tk.LEFT, padx=10)
+        tk.Label(y_label_frame, text="Min:", bg="#f4f4f4", font=("맑은 고딕", 8)).pack(side=tk.LEFT)
+        tk.Entry(y_label_frame, textvariable=self.y_min_var, width=6, font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
+        tk.Label(y_label_frame, text="Max:", bg="#f4f4f4", font=("맑은 고딕", 8)).pack(side=tk.LEFT, padx=2)
+        tk.Entry(y_label_frame, textvariable=self.y_max_var, width=6, font=("Consolas", 9)).pack(side=tk.LEFT, padx=2)
+        
         tk.Checkbutton(ctrl_f, text="Delta Mode (%)", variable=self.is_delta_mode, bg="#f4f4f4", 
                        command=lambda: self.run_with_progress_pop("모드 변환 및 연산 중", self.execute_ui_rendering)).pack(side=tk.LEFT, padx=5)
         tk.Button(ctrl_f, text="↩ 되돌리기 (Undo)", font=("맑은 고딕", 9, "bold"), bg="#7f8c8d", fg="white", 
                   command=lambda: self.run_with_progress_pop("작업 되돌리는 중", self.perform_undo)).pack(side=tk.LEFT, padx=5)
         tk.Button(ctrl_f, text="📄 가로 포맷 PDF 리포트 저장", font=("맑은 고딕", 9, "bold"), bg="#c0392b", fg="white", command=self.export_to_pdf).pack(side=tk.LEFT, padx=5)
         
-        # 언제든 인풋 화면으로 안전 진입 복귀하는 홈 메뉴 버튼 배치
         tk.Button(ctrl_f, text="🏠 처음 화면으로 돌아가기", font=("맑은 고딕", 9, "bold"), bg="#2ecc71", fg="white",
                   command=self.return_to_home_screen).pack(side=tk.LEFT, padx=15)
 
@@ -409,8 +428,6 @@ class DataAnalysisApp(tk.Tk):
 
             for f_idx, filename in enumerate(lot_files):
                 ro_lbl = self.raw_files_data[filename]['ro']
-                
-                # Delta Mode 활성화 상태에서는 0번째(첫 번째) Read-out 라인을 시각화 목록에서 완전 생략
                 if self.is_delta_mode.get() and f_idx == 0:
                     continue
                     
@@ -423,7 +440,6 @@ class DataAnalysisApp(tk.Tk):
                     px.append(s_id)
                     py.append(float(val))
                     
-                    # 마커 변경 고유 키를 시료ID + 해당 시간대(ro_lbl) 조합의 4중 튜플 구조로 독립 제어
                     c_key = (target_group_key, param, s_id, ro_lbl)
                     if c_key in self.custom_colors:
                         pc.append(self.custom_colors[c_key])
@@ -442,7 +458,7 @@ class DataAnalysisApp(tk.Tk):
                 })
 
         for param in self.selected_parameters:
-            b_data, a_labels, b_cols, stats = [], [], [], []
+            b_data, a_labels, b_cols, stats_data = [], [], [], []
             del_set = self.deleted_units.get((target_group_key, param), set())
 
             for f_idx, fn in enumerate(lot_files):
@@ -453,11 +469,27 @@ class DataAnalysisApp(tk.Tk):
                         b_data.append(vals)
                         a_labels.append(self.raw_files_data[fn]['ro'])
                         b_cols.append(base_colors[f_idx % len(base_colors)])
-                        stats.append(f"[{self.raw_files_data[fn]['ro']}]\nAvg:{np.mean(vals):.1f}\nStd:{np.std(vals):.1f}")
+                        
+                        stats_data.append({
+                            'ro': self.raw_files_data[fn]['ro'],
+                            'min': np.min(vals),
+                            'max': np.max(vals),
+                            'avg': np.mean(vals),
+                            'std': np.std(vals)
+                        })
             
-            if b_data: box_plots_meta.append({'title': f"{param} Dist", 'b_data': b_data, 'a_labels': a_labels, 'b_cols': b_cols, 'stats': stats})
+            if b_data: box_plots_meta.append({'title': f"{param} Dist", 'b_data': b_data, 'a_labels': a_labels, 'b_cols': b_cols, 'stats_data': stats_data})
 
         return line_plots_meta, box_plots_meta
+
+    def apply_y_limits_if_needed(self, ax):
+        try:
+            min_val = self.y_min_var.get().strip()
+            max_val = self.y_max_var.get().strip()
+            if min_val != "": ax.set_ylim(bottom=float(min_val))
+            if max_val != "": ax.set_ylim(top=float(max_val))
+        except ValueError:
+            pass
 
     def execute_ui_rendering(self):
         for w in self.scrollable_frame.winfo_children(): w.destroy()
@@ -496,6 +528,7 @@ class DataAnalysisApp(tk.Tk):
                     ax.set_xticks(range(len(m['all_samples'])))
                     ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=7)
                     ax.grid(True, linestyle=":", alpha=0.5)
+                    self.apply_y_limits_if_needed(ax)
                     
                     handles, labels = ax.get_legend_handles_labels()
                     by_label = dict(zip(labels, handles))
@@ -515,21 +548,32 @@ class DataAnalysisApp(tk.Tk):
                 for c in range(4): box_frame.grid_columnconfigure(c, weight=1)
                 
                 for idx, m in enumerate(box_meta):
-                    fig, ax = plt.subplots(figsize=(3.1, 2.5))
+                    # [요청 규칙 1 보강]: 통계 문자열 세로 레이아웃 확장을 위한 축 비율 정비
+                    fig, (ax, ax_stat) = plt.subplots(2, 1, figsize=(3.3, 4.0), gridspec_kw={'height_ratios': [2.2, 1.4]})
+                    
                     bp = ax.boxplot(m['b_data'], patch_artist=True)
                     ax.set_xticklabels(m['a_labels'], fontsize=8)
                     for patch, color in zip(bp['boxes'], m['b_cols']):
                         patch.set_facecolor(color); patch.set_alpha(0.6)
                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=9, weight='bold')
                     ax.grid(True, alpha=0.3)
-                    plt.tight_layout()
+                    self.apply_y_limits_if_needed(ax)
                     
+                    ax_stat.axis('off')
+                    
+                    # [요청 규칙 1 반영]: 각 Lot의 box plot 하단 정위치에 Min, Max, AVG, STD 순서로 수직 수하 배치
+                    for b_idx, s in enumerate(m['stats_data']):
+                        x_pos = b_idx + 1
+                        stat_text = f"[{s['ro']}]\nMin:{s['min']:.2f}\nMax:{s['max']:.2f}\nAVG:{s['avg']:.2f}\nSTD:{s['std']:.2f}"
+                        
+                        ax.text(x_pos, -0.15, stat_text, transform=ax.get_xaxis_transform(),
+                                fontsize=7, fontfamily="Consolas", ha='center', va='top',
+                                bbox=dict(boxstyle='square,pad=0.2', facecolor='#fafafa', edgecolor='#dddddd', alpha=0.8))
+                    
+                    plt.tight_layout()
                     bb = tk.Frame(box_frame, bd=1, relief=tk.GROOVE, bg="white")
                     bb.grid(row=idx//4, column=idx%4, padx=5, pady=5, sticky="nsew")
                     FigureCanvasTkAgg(fig, master=bb).get_tk_widget().pack()
-                    
-                    sf = tk.Frame(bb, bg="#fafafa"); sf.pack(fill=tk.X)
-                    for s in m['stats']: tk.Label(sf, text=s, font=("맑은 고딕", 7), bg="#fafafa", justify=tk.LEFT).pack(anchor="w", padx=5)
                     plt.close(fig)
 
     def on_chart_point_clicked(self, event):
@@ -634,6 +678,7 @@ class DataAnalysisApp(tk.Tk):
                                     ax.set_xticks(range(len(m['all_samples'])))
                                     ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=6)
                                     ax.grid(True, linestyle=":", alpha=0.4)
+                                    self.apply_y_limits_if_needed(ax)
                                     
                                     handles, labels = ax.get_legend_handles_labels()
                                     by_label = dict(zip(labels, handles))
@@ -647,12 +692,11 @@ class DataAnalysisApp(tk.Tk):
                                 plt.close(fig)
                                 
                         if box_meta:
-                            b_cols, b_items_per_page = 4, 8
+                            b_cols, b_rows, b_items_per_page = 4, 2, 8
                             for i in range(0, len(box_meta), b_items_per_page):
                                 chunk = box_meta[i:i+b_items_per_page]
-                                b_rows = int(np.ceil(len(chunk) / b_cols))
-                                
                                 fig, axes = plt.subplots(b_rows, b_cols, figsize=(11, 8.5), squeeze=False)
+                                
                                 for idx, m in enumerate(chunk):
                                     r, c = idx // b_cols, idx % b_cols
                                     ax = axes[r, c]
@@ -664,11 +708,18 @@ class DataAnalysisApp(tk.Tk):
                                         
                                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=8, weight='bold')
                                     ax.grid(True, alpha=0.3)
+                                    self.apply_y_limits_if_needed(ax)
                                     
-                                    stat_str = "\n".join([s.replace('\n', ' ') for s in m['stats']])
-                                    ax.text(0.05, -0.4, stat_str, transform=ax.transAxes, fontsize=5, verticalalignment='top')
+                                    # PDF 리포트 하단 정위치 통계 레이아웃 빌드
+                                    for b_idx, s in enumerate(m['stats_data']):
+                                        x_pos = b_idx + 1
+                                        stat_str_pdf = f"Min:{s['min']:.1f}\nMax:{s['max']:.1f}\nAVG:{s['avg']:.1f}\nSTD:{s['std']:.1f}"
+                                        ax.text(x_pos, -0.18, stat_str_pdf, transform=ax.get_xaxis_transform(),
+                                                fontsize=5, fontfamily="Consolas", ha='center', va='top')
                                 
-                                for idx in range(len(chunk), b_rows * b_cols): axes[idx // b_cols, idx % b_cols].axis('off')
+                                for idx in range(len(chunk), b_rows * b_cols): 
+                                    axes[idx // b_cols, idx % b_cols].axis('off')
+                                    
                                 plt.tight_layout()
                                 pdf.savefig(fig, dpi=200)
                                 plt.close(fig)
