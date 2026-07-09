@@ -62,23 +62,24 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v13.0 - [Multi Read-out Overlay Engine]")
+        self.title("Reliability Data Analyzer v14.0 - [Premium Suite]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
+        self.reset_internal_states()
+        self.init_upload_menu()
+        
+    def reset_internal_states(self):
         self.raw_files_data = {}  
         self.parameter_list = []
         self.selected_parameters = []
         self.lot_groups = {}
         self.lot_display_names = {}
-        
         self.custom_colors = {}   
         self.deleted_units = {}    
         self.undo_stack = []       
-        
         self.is_delta_mode = tk.BooleanVar(value=False)
-        self.init_upload_menu()
-        
+
     def center_window(self, win, w, h):
         win.update_idletasks()
         ws = win.winfo_screenwidth()
@@ -116,7 +117,6 @@ class DataAnalysisApp(tk.Tk):
         tokens = [t for t in rem.split(' ') if t and not t.isdigit()]
         test_item = tokens[0].upper() if tokens else "RELIABILITY_TEST"
         
-        # 그래프를 누적할 메인 그룹 키 조합: "신뢰성항목_LOT번호"
         group_key = f"{test_item}_{lot_str}"
         return group_key, ro_str, ro_num, test_item, lot_str
 
@@ -157,7 +157,6 @@ class DataAnalysisApp(tk.Tk):
         temp_data, all_p, self.lot_groups = {}, set(), {}
         total_files = len(files)
         
-        # 모든 파일을 각각 독립적으로 스캔 (1번 요구사항 반영)
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
             self.after(0, pb.update_progress, idx, total_files, f"파일 개별 파싱 중 ({idx+1}/{total_files})")
@@ -171,24 +170,19 @@ class DataAnalysisApp(tk.Tk):
             test_no_row_idx = None
             start_col_idx = None
             
-            # 파일별 1열(0번 열) 지시어 독립 스캔 검색
             for i in range(min(60, len(df))):
                 col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
-                
                 if "parameter" in col0_str:
-                    p_name_row_idx = i + 1  # Parameter 바로 한 줄 아래 행
+                    p_name_row_idx = i + 1  
                     for c_idx in range(df.shape[1]):
                         if re.match(r'^t1$', str(df.iloc[i, c_idx]).strip(), re.IGNORECASE):
                             start_col_idx = c_idx
                             break
-                            
                 if "unit" in col0_str:
                     unit_row_idx = i
-                    
                 if "testno" in col0_str:
                     test_no_row_idx = i
 
-            # 탐색 실패 시 기본 고정 픽셀 백업 매칭 가동
             if p_name_row_idx is None: p_name_row_idx = 19
             if unit_row_idx is None: unit_row_idx = 26
             if test_no_row_idx is None: test_no_row_idx = 46
@@ -196,7 +190,6 @@ class DataAnalysisApp(tk.Tk):
 
             if test_no_row_idx >= len(df): continue
             
-            # 시료 번호 독립 추출
             units = []
             data_row_positions = []
             for i in range(test_no_row_idx + 1, len(df)):
@@ -214,9 +207,14 @@ class DataAnalysisApp(tk.Tk):
             cont_prefix = ""
             max_cols = df.shape[1]
             
-            # 현재 파일 내 파라미터 열 전체 추출 및 유연 매칭
             for col_idx in range(start_col_idx, max_cols):
                 if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df):
+                    continue
+                
+                # [요청 규칙 1 반영]: 단위 행(Unit 행) 확인
+                unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
+                # 단위가 없거나 공란, 혹은 누락을 뜻하는 기호인 경우 그래프 연산에서 완전히 배제(제외)
+                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
                     continue
                 
                 p_name_raw = str(df.iloc[p_name_row_idx, col_idx]).strip()
@@ -229,7 +227,6 @@ class DataAnalysisApp(tk.Tk):
                         cont_prefix = p_name_raw.upper().split('_')[1]
                         continue
                 
-                # 중복 방지 조합 명명법 (3번째 아래 행 조건 검사 및 결합)
                 sub_name_idx = p_name_row_idx + 3
                 p_name_final = p_name_raw
                 if sub_name_idx < len(df):
@@ -242,12 +239,6 @@ class DataAnalysisApp(tk.Tk):
                 if self.data_mode == "Module" and cont_prefix:
                     p_name_final = f"{cont_prefix}_{p_name_final}"
                 
-                # 단위 처리
-                unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
-                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
-                    unit_val = "-"
-                
-                # 시료별 데이터 값 파싱
                 vals = []
                 for r_pos in data_row_positions:
                     if r_pos < len(df):
@@ -261,7 +252,6 @@ class DataAnalysisApp(tk.Tk):
                     all_p.add(p_name_final)
             
             if p_dict:
-                # 중요: 파일 고유 키 생성 시 중복 유실 방지
                 unique_fname_key = f"{fname}_{idx}"
                 temp_data[unique_fname_key] = {'lot_key': group_key, 'ro': ro, 'ro_num': ro_n, 'params': p_dict, 'test_item': test_item, 'lot_id': lot_id}
                 if group_key not in self.lot_groups: 
@@ -269,12 +259,11 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("파일 내에서 조건에 부합하는 유효한 파라미터 데이터를 추출하지 못했습니다.")
+            raise ValueError("단위가 존재하는 유효한 파라미터 데이터를 추출하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
         
-        # 차트 그룹 내의 모든 Read-out 파일들을 순서대로(0hr, 100hr, 500hr...) 정렬
         for g_key in self.lot_groups:
             self.lot_groups[g_key].sort(key=lambda x: self.raw_files_data[x]['ro_num'])
             f_meta = self.raw_files_data[self.lot_groups[g_key][0]]
@@ -295,6 +284,10 @@ class DataAnalysisApp(tk.Tk):
         tk.Button(ctrl_f, text="↩ 되돌리기 (Undo)", font=("맑은 고딕", 9, "bold"), bg="#7f8c8d", fg="white", 
                   command=lambda: self.run_with_progress_pop("작업 되돌리는 중", self.perform_undo)).pack(side=tk.LEFT, padx=5)
         tk.Button(ctrl_f, text="📄 가로 포맷 PDF 리포트 저장", font=("맑은 고딕", 9, "bold"), bg="#c0392b", fg="white", command=self.export_to_pdf).pack(side=tk.LEFT, padx=5)
+        
+        # [요청 규칙 4 반영]: 처음 데이터 인풋 과정으로 온전히 돌아가는 메인 홈 메뉴 버튼 배치
+        tk.Button(ctrl_f, text="🏠 처음 화면으로 돌아가기", font=("맑은 고딕", 9, "bold"), bg="#2ecc71", fg="white",
+                  command=self.return_to_home_screen).pack(side=tk.LEFT, padx=15)
 
         tk.Label(t, text="Parameter Selector (다중 선택 가능):", font=("맑은 고딕", 11, "bold"), bg="#f4f4f4").pack(anchor="w")
         lf = tk.Frame(t); lf.pack(fill=tk.X, pady=5)
@@ -325,6 +318,12 @@ class DataAnalysisApp(tk.Tk):
         self.canvas.bind_all("<MouseWheel>", self._on_mouse_wheel)
         
         self.run_with_progress_pop("초기 그래프 로딩 중", self.update_selections_and_render)
+
+    def return_to_home_screen(self):
+        # 홈 버튼 선택 시 모든 내부 메모리 사전을 클리어하고 최초 시동 메인으로 복귀
+        if messagebox.askyesno("화면 초기화", "분석을 종료하고 처음 파일 선택 화면으로 이동하시겠습니까?"):
+            self.reset_internal_states()
+            self.init_upload_menu()
 
     def run_with_progress_pop(self, title_text, target_func):
         pb = AutoClosingProgressPop(self, title_text)
@@ -363,7 +362,6 @@ class DataAnalysisApp(tk.Tk):
             master_map = {} 
             all_samples_set = set()
 
-            # 차트 그룹 내의 모든 Read-out 파일들을 순회하면서 데이터를 누적 (2번 요구사항 해결 핵심)
             for filename in lot_files:
                 if param not in self.raw_files_data[filename]['params']: continue
                 p_info = self.raw_files_data[filename]['params'][param]
@@ -378,6 +376,7 @@ class DataAnalysisApp(tk.Tk):
             try: all_samples = sorted(list(all_samples_set), key=lambda x: float(re.findall(r'\d+\.?\d*', x)[0]) if re.findall(r'\d+\.?\d*', x) else x)
             except: all_samples = sorted(list(all_samples_set))
 
+            # Delta Mode 기준 축 정비
             if self.is_delta_mode.get() and len(lot_files) > 0:
                 ref_ro = self.raw_files_data[lot_files[0]]['ro']
                 for s_id in all_samples:
@@ -393,11 +392,14 @@ class DataAnalysisApp(tk.Tk):
             del_set = self.deleted_units.get((target_group_key, param), set())
             lines_dataset = []
 
-            # 모든 시간대(Read-out)가 겹쳐서 그래프에 표현되도록 데이터셋 추가
             for f_idx, filename in enumerate(lot_files):
                 ro_lbl = self.raw_files_data[filename]['ro']
-                px, py, pc, pm = [], [], [], []
                 
+                # [요청 규칙 2 반영]: Delta Mode 일 때, 0번째(첫 번째) Read-out 파일은 플로팅 데이터셋 목록 빌드에서 완전 생략
+                if self.is_delta_mode.get() and f_idx == 0:
+                    continue
+                    
+                px, py, pc, pm = [], [], [], []
                 for s_id in all_samples:
                     if s_id in del_set: continue
                     val = master_map[s_id].get(ro_lbl, np.nan)
@@ -406,13 +408,14 @@ class DataAnalysisApp(tk.Tk):
                     px.append(s_id)
                     py.append(float(val))
                     
-                    c_key = (target_group_key, param, s_id)
+                    # [요청 규칙 3 반영]: 고유 마킹 조회를 시료ID + 시간대(ro_lbl) 조합의 튜플 키로 고유 분리화 수행
+                    c_key = (target_group_key, param, s_id, ro_lbl)
                     if c_key in self.custom_colors:
                         pc.append(self.custom_colors[c_key])
-                        pm.append('^')
+                        pm.append('^') # 바뀐 마커는 세모
                     else:
                         pc.append(base_colors[f_idx % len(base_colors)])
-                        pm.append('o')
+                        pm.append('o') # 기본 마커는 동그라미
                 
                 if px:
                     lines_dataset.append((px, py, pc, pm, ro_lbl, base_colors[f_idx % len(base_colors)]))
@@ -427,7 +430,6 @@ class DataAnalysisApp(tk.Tk):
             b_data, a_labels, b_cols, stats = [], [], [], []
             del_set = self.deleted_units.get((target_group_key, param), set())
 
-            # Box plot 역시 모든 시간대(Read-out)가 가로로 차례대로 나열되어 한눈에 보임
             for f_idx, fn in enumerate(lot_files):
                 if param in self.raw_files_data[fn]['params']:
                     p_info = self.raw_files_data[fn]['params'][param]
@@ -473,6 +475,7 @@ class DataAnalysisApp(tk.Tk):
                         ax.plot(px, py, color=b_col, alpha=0.7, linewidth=1.5, zorder=1, label=ro_lbl)
                         for xi, yi, ci, mi in zip(px, py, pc, pm):
                             sc = ax.scatter(xi, yi, color=ci, marker=mi, s=55 if mi=='^' else 35, zorder=3, picker=3)
+                            # 메타데이터 사전에 특정 시점 도출용 ro_lbl 탑재
                             sc.__dict__['metadata'] = {'group_key': g_key, 'param': m['param'], 'unit': xi, 'ro': ro_lbl}
                     
                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=9, weight='bold')
@@ -529,7 +532,7 @@ class DataAnalysisApp(tk.Tk):
         self.center_window(m, 450, 180); m.transient(self); m.grab_set()
         
         tk.Label(m, text=f"선택 시료 번호: {unit_id} ({ro_info})", font=("맑은 고딕", 11, "bold")).pack(pady=10)
-        color_section = tk.LabelFrame(m, text="변경할 색상 선택", font=("맑은 고딕", 9))
+        color_section = tk.LabelFrame(m, text="변경할 색상 선택 (해당 타임 마커만 단독 변경)", font=("맑은 고딕", 9))
         color_section.pack(fill=tk.X, padx=15, pady=5)
         
         distinct_palette = ["#FF0000", "#0026ff", "#00b321", "#9400d3", "#ff8c00"]
@@ -537,8 +540,9 @@ class DataAnalysisApp(tk.Tk):
         btn_frame.pack(pady=5)
         
         for hex_code in distinct_palette:
+            # 색상 적용 함수 호출 시 타임 정보(ro_info)를 누락 없이 인자로 넘김
             btn = tk.Button(btn_frame, bg=hex_code, activebackground=hex_code, width=5, height=2, bd=2, relief=tk.RAISED,
-                            command=lambda k=g_key, p=param, u=unit_id, c=hex_code: [m.destroy(), self.run_with_progress_pop("마커 색상 변경 중", lambda: self.apply_point_color(k, p, u, c))])
+                            command=lambda k=g_key, p=param, u=unit_id, r=ro_info, c=hex_code: [m.destroy(), self.run_with_progress_pop("마커 색상 변경 중", lambda: self.apply_point_color(k, p, u, r, c))])
             btn.pack(side=tk.LEFT, padx=8)
             
         action_f = tk.Frame(m); action_f.pack(pady=10)
@@ -546,8 +550,9 @@ class DataAnalysisApp(tk.Tk):
                   command=lambda: [m.destroy(), self.run_with_progress_pop("시료 데이터 제외 중", lambda: self.delete_target_unit(g_key, param, unit_id))]).pack(side=tk.LEFT, padx=10)
         tk.Button(action_f, text="창 닫기", command=m.destroy).pack(side=tk.LEFT, padx=10)
 
-    def apply_point_color(self, g_key, param, unit_id, chosen_color):
-        c_key = (g_key, param, unit_id)
+    def apply_point_color(self, g_key, param, unit_id, ro_info, chosen_color):
+        # [요청 규칙 3 해결]: 딕셔너리 키 조합에 타임 정보(ro_info)를 더해 고유 독립 개체로 할당
+        c_key = (g_key, param, unit_id, ro_info)
         self.undo_stack.append(('color', c_key, self.custom_colors.get(c_key, None)))
         self.custom_colors[c_key] = chosen_color
         self.execute_ui_rendering()
