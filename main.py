@@ -108,7 +108,28 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
+        # 전체를 대문자로 변환하여 일관성 확보
         name_we = os.path.splitext(filename)[0].upper()
+        
+        # [최종 수정] 1순위 강제 격리 추출 엔진 가동: Read-out(시간대/사이클) 정보 원천 차단 필터
+        ro_match = re.search(r'(\d+)\s*(HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST)', name_we, re.IGNORECASE)
+        if ro_match:
+            ro_num = int(ro_match.group(1))
+            ro_str = ro_match.group(0).lower()
+            # 파일명 전체 문자열에서 검출된 시간대 정보 문자열을 흔적도 없이 삭제 (LOT 이름 훼손 원인 차단)
+            name_we = name_we.replace(ro_match.group(0), "")
+        else:
+            # 보조 숫자 스캔 필터링
+            digits = re.findall(r'\d+', name_we)
+            if digits:
+                ro_num = int(digits[0])
+                ro_str = f"{ro_num}hr"
+                name_we = name_we.replace(digits[0], "")
+            else:
+                ro_num = 0
+                ro_str = "0hr"
+
+        # 타임 정보가 삭제된 상태의 파일명에서 토큰 재분리
         tokens = [t.strip() for t in name_we.split('+') if t.strip()]
         
         rel_keywords = [
@@ -118,41 +139,19 @@ class DataAnalysisApp(tk.Tk):
         ]
         
         test_item = "RELIABILITY_TEST"
-        ro_str = ""
-        ro_num = 0
-        
-        for t in tokens:
-            ro_match = re.search(r'(\d+)\s*(HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST)', t, re.IGNORECASE)
-            if ro_match:
-                ro_num = int(ro_match.group(1))
-                ro_str = t.lower()
-                break
-        if not ro_str:
-            for t in tokens:
-                digits = re.findall(r'\d+', t)
-                if digits and len(t) < 6:
-                    ro_num = int(digits[0])
-                    ro_str = f"{ro_num}hr"
-                    break
-        if not ro_str:
-            ro_str = "0hr"
-
         for t in tokens:
             if t in rel_keywords:
                 test_item = t
                 break
-        if test_item == "RELIABILITY_TEST" and tokens:
-            for t in tokens:
-                if t.lower() != ro_str:
-                    test_item = t
-                    break
-
-        lot_tokens = [t for t in tokens if t != test_item and t.lower() != ro_str]
+                
+        # 신뢰성 항목 명칭을 제외한 순수 알짜배기 찌꺼기만 결합하여 LOT 번호 생성
+        lot_tokens = [t for t in tokens if t != test_item]
         if lot_tokens:
             lot_str = "+".join(lot_tokens)
         else:
             lot_str = "UNKNOWN_LOT"
             
+        # 이제 동일 Lot 데이터는 무조건 단 하나의 일치하는 group_key를 선점하게 됩니다.
         group_key = f"{test_item}_{lot_str}"
         return group_key, ro_str, ro_num, test_item, lot_str
 
@@ -181,7 +180,7 @@ class DataAnalysisApp(tk.Tk):
         self.data_mode = mode
         win.destroy()
         
-        pb = AutoClosingProgressPop(self, "데이터 가상화 정렬 및 다중 병합 연산 중")
+        pb = AutoClosingProgressPop(self, "데이터 구조 분석 및 자동 매칭 연산 중")
         def target_thread():
             try:
                 self.process_files(files, pb)
@@ -196,7 +195,7 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"격자 주소 공간 동기화 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"격자 규격 주소 동기화 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
@@ -221,10 +220,10 @@ class DataAnalysisApp(tk.Tk):
                     col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
                     if "parameter" in col0_str: base_row_idx = i
             
-            # [수정] 오프셋 규칙 정밀 고정 (N=기준행, N+1=파라미터명, N+4=테스트조건, N+7=단위행)
+            # [수정] 오프셋 규칙 절대 고정: N(기준행), N+1(파라미터명), N+4(테스트 조건), N+7(단위행)
             if base_row_idx is not None:
                 p_name_row_idx = base_row_idx + 1
-                cond_row_idx = base_row_idx + 4  # N + 4 고정 적용 완료
+                cond_row_idx = base_row_idx + 4  
                 unit_row_idx = base_row_idx + 7
                 test_no_row_idx = base_row_idx + 27 if base_row_idx + 27 < len(df) else base_row_idx + 10
             else:
@@ -252,12 +251,12 @@ class DataAnalysisApp(tk.Tk):
             
             p_dict = {}
             max_cols = df.shape[1]
-            current_cont_prefix = "" # [수정] Module 스캔 시 CONT_ 접두사를 누적 유지할 상태 변수
+            current_cont_prefix = "" 
             
             for col_idx in range(start_col_idx, max_cols):
                 if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df): continue
                 
-                # 단위 데이터 추출 및 검사
+                # 단위 데이터 추출
                 unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
                 if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
                     unit_val = ""
@@ -266,15 +265,15 @@ class DataAnalysisApp(tk.Tk):
                 if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "'"]: 
                     continue
                 
-                # [수정] Module 전용 CONT_ 접두사 추출 및 상태 전파 전력 스캔 규칙
+                # [수정] Module 전용 CONT_ 접두사 영속 상속 상태 머신 가동
                 if self.data_mode == "Module":
                     if p_name_raw.upper().startswith("CONT_"):
                         tokens_cont = p_name_raw.upper().split('_')
                         if len(tokens_cont) > 1:
                             current_cont_prefix = tokens_cont[1]
-                        continue # CONT_ 단독 행은 단위가 없으므로 수집 생략
+                        continue 
                 
-                # [수정] 단위가 없는 파라미터는 분석 대상에서 원천 배제(필터링)
+                # [수정] 단위가 누락된 파라미터 컬럼 항목 필터링 차단
                 if not unit_val:
                     continue
 
@@ -283,7 +282,7 @@ class DataAnalysisApp(tk.Tk):
                     cond_val = str(df.iloc[cond_row_idx, col_idx]).strip()
                     if pd.isna(df.iloc[cond_row_idx, col_idx]) or cond_val.lower() in ["nan", "'"]: cond_val = ""
 
-                # [수정] 데이터 모드별 파라미터 유일 결합 키 생성 규칙 고도화 (동일 Lot 내 병합 완벽 보장)
+                # 유일 해시 결합 매칭 키 생성 규칙 통일
                 p_name_key = p_name_raw.upper()
                 if self.data_mode == "Module" and current_cont_prefix:
                     p_name_key = f"{current_cont_prefix}_{p_name_key}"
@@ -300,7 +299,6 @@ class DataAnalysisApp(tk.Tk):
                 vals = pd.to_numeric(vals, errors='coerce').tolist()
                 
                 if not all(v is None or np.isnan(v) for v in vals):
-                    # 표시용 텍스트 조립용 메타 저장
                     display_raw_title = f"{current_cont_prefix}_{p_name_raw}" if (self.data_mode == "Module" and current_cont_prefix) else p_name_raw
                     p_dict[p_name_final] = {
                         'raw_name': display_raw_title, 'cond': cond_val, 'unit': unit_val, 'values': vals, 'units_map': units
@@ -315,7 +313,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("단위를 포함한 정상적인 유효 파라미터를 발굴하지 못했습니다.")
+            raise ValueError("단위를 포함하는 유효 파라미터가 감출되지 않았습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -325,7 +323,7 @@ class DataAnalysisApp(tk.Tk):
             f_meta = self.raw_files_data[self.lot_groups[g_key][0]]
             self.lot_display_names[g_key] = f"{f_meta['test_item']}_{f_meta['lot_id']}"
             
-        self.after(0, pb.update_progress, total_files, total_files, "파싱 완료")
+        self.after(0, pb.update_progress, total_files, total_files, "파싱 정렬 완료")
         self.after(250, self.init_analysis_menu)
 
     def init_analysis_menu(self):
@@ -467,7 +465,7 @@ class DataAnalysisApp(tk.Tk):
 
             if lines_dataset:
                 display_unit = "%" if self.is_delta_mode.get() else unit_str
-                # [수정] 그래프 상단 제목 포맷에서 불필요한 Lot 장식 완전 삭제 규칙 준수
+                # [수정] 차트 제목 포맷 가이드라인 절대 준수 ('parameter_테스트 조건')
                 title_formatter = f"{raw_name}_{cond_str} ({display_unit})" if cond_str else f"{raw_name} ({display_unit})"
                 line_plots_meta.append({
                     'param': param, 'title': title_formatter, 'dataset': lines_dataset, 'all_samples': [s for s in all_samples if s not in del_set]
@@ -561,10 +559,10 @@ class DataAnalysisApp(tk.Tk):
                             sc = ax.scatter(xi, yi, color=ci, marker=mi, s=55 if mi=='^' else 35, zorder=3, picker=3)
                             sc.__dict__['metadata'] = {'group_key': g_key, 'param': m['param'], 'unit': xi, 'ro': ro_lbl}
                     
-                    # [수정] 순수 파라미터명 포맷 타이틀 노출
+                    # [수정] 순수 텍스트 타이틀 표기 규칙 적용
                     ax.set_title(m['title'], fontsize=10, weight='bold')
                     
-                    # [수정] Discrete 분석 모드 축 눈금 레이블 및 홀수 minor grid 적용 규칙 완비
+                    # [수정] Discrete 분석 모드 축 레이블 처리 및 홀수 보조 격자선(Minor Grid) 구현 완료
                     if self.data_mode == "Discrete":
                         tick_positions, tick_labels = [], []
                         for s_idx, s_name in enumerate(m['all_samples']):
@@ -580,9 +578,9 @@ class DataAnalysisApp(tk.Tk):
                         ax.set_xticks(tick_positions)
                         ax.set_xticklabels(tick_labels, rotation=0, fontsize=7)
                         
-                        # 홀수 영역 minor tick 활성화를 통한 격자선 가독성 확장
+                        # 홀수 자리를 정밀 지탱하는 마이너 로케이터 그리드 결합
                         ax.xaxis.set_minor_locator(ticker.MultipleLocator(1))
-                        ax.grid(True, which='minor', color='#e0e0e0', linestyle='--', alpha=0.5)
+                        ax.grid(True, which='minor', color='#e5e5e5', linestyle='--', alpha=0.7)
                     else:
                         ax.set_xticks(range(len(m['all_samples'])))
                         ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=7)
@@ -736,7 +734,7 @@ class DataAnalysisApp(tk.Tk):
                     total_steps = len(groups)
                     
                     for step, g_key in enumerate(groups):
-                        self.after(0, pb.update_progress, int((step/total_steps)*100), 100, f"[{g_key}] 가로 벡터 변환 중...")
+                        self.after(0, pb.update_progress, int((step/total_steps)*100), 100, f"[{g_key}] 가로 벡터 데이터 변환 중...")
                         line_meta, box_meta = self.build_chart_data_structures(g_key)
                         
                         if line_meta:
