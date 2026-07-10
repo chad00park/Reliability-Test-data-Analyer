@@ -50,6 +50,7 @@ class AutoClosingProgressPop(tk.Toplevel):
         self.update()
         
     def update_progress(self, current, total, text=""):
+        if not self.winfo_exists(): return
         percent = int((current / total) * 100) if total > 0 else 0
         if percent > 100: percent = 100
         self.progress['value'] = percent
@@ -57,7 +58,15 @@ class AutoClosingProgressPop(tk.Toplevel):
         self.update_idletasks()
         self.update()
         if percent >= 100:
-            self.after(200, self.destroy)
+            self.after(200, self.safe_destroy)
+
+    def safe_destroy(self):
+        try:
+            if self.winfo_exists():
+                self.grab_release()
+                self.destroy()
+        except:
+            pass
 
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
@@ -87,7 +96,6 @@ class DataAnalysisApp(tk.Tk):
         hs = win.winfo_screenheight()
         x = (ws / 2) - (w / 2)
         y = (hs / 2) - (h / 2)
-        # [수정 완료]: 문자열 'h' 오타 완벽히 제거 및 정형 포맷 복구
         win.geometry(f'{w}x{h}+{int(x)}+{int(y)}')
 
     def init_upload_menu(self):
@@ -172,13 +180,13 @@ class DataAnalysisApp(tk.Tk):
         self.data_mode = mode
         win.destroy()
         
-        pb = AutoClosingProgressPop(self, "데이터 연산 처리 중")
+        pb = AutoClosingProgressPop(self, "데이터 구조 가상화 및 연산 중")
         def target_thread():
             try:
                 self.process_files(files, pb)
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Error", f"분석 오류 발생:\n{str(e)}"))
-                if pb.winfo_exists(): pb.destroy()
+                self.after(0, pb.safe_destroy)
         threading.Thread(target=target_thread, daemon=True).start()
 
     def process_files(self, files, pb):
@@ -187,43 +195,49 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"파일 구조 분석 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"격자 행렬 매칭 스캔 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
             if df.empty: continue
             
-            p_name_row_idx = None
+            base_row_idx = None
             unit_row_idx = None
             test_no_row_idx = None
             start_col_idx = None
             
-            # [수정 완료]: 1열(0번 인덱스) 기준 행 추적 연산 방식 전면 수정
-            # 'T1' 컬럼명이 적혀 있는 바로 그 행을 찾아 파라미터 이름의 행 인덱스로 동적 고정
-            for i in range(min(100, len(df))):
+            for i in range(min(120, len(df))):
                 col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
-                
-                # 가변적인 구조에서도 데이터 헤더 열(T1)이 검출되는 행을 직접 파라미터명 위치로 선점
+                found_t1 = False
                 for c_idx in range(df.shape[1]):
                     if re.match(r'^t1$', str(df.iloc[i, c_idx]).strip(), re.IGNORECASE):
                         start_col_idx = c_idx
-                        p_name_row_idx = i  # T1, T2가 들어 있는 그 행 자체를 파라미터 명의 행으로 취급
+                        base_row_idx = i  
+                        found_t1 = True
                         break
-                
-                if "unit" in col0_str:
-                    unit_row_idx = i
-                if "testno" in col0_str:
-                    test_no_row_idx = i
+                if found_t1: break
 
-            # 매칭 실패 시를 대비한 예외 방어선 코드
-            if p_name_row_idx is None: p_name_row_idx = 20
-            if unit_row_idx is None: unit_row_idx = 26
-            if test_no_row_idx is None: test_no_row_idx = 46
+            if base_row_idx is None:
+                for i in range(min(120, len(df))):
+                    col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
+                    if "parameter" in col0_str: base_row_idx = i
+            
+            if base_row_idx is not None:
+                p_name_row_idx = base_row_idx + 1
+                cond_row_idx = base_row_idx + 3
+                unit_row_idx = base_row_idx + 7
+                test_no_row_idx = base_row_idx + 27 if base_row_idx + 27 < len(df) else base_row_idx + 10
+            else:
+                p_name_row_idx, cond_row_idx, unit_row_idx, test_no_row_idx = 20, 22, 26, 46
+            
+            for i in range(min(120, len(df))):
+                col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
+                if "unit" in col0_str: unit_row_idx = i
+                if "testno" in col0_str: test_no_row_idx = i
+
             if start_col_idx is None: start_col_idx = 7
-
             if test_no_row_idx >= len(df): continue
             
-            # 시료 번호 파싱
             units = []
             data_row_positions = []
             for i in range(test_no_row_idx + 1, len(df)):
@@ -232,58 +246,46 @@ class DataAnalysisApp(tk.Tk):
                     units.append(v0)
                     data_row_positions.append(i)
                 else:
-                    if len(units) > 0 and v0 == "":
-                        break
+                    if len(units) > 0 and v0 == "": break
                         
             if len(units) == 0: continue
             
             p_dict = {}
-            cont_prefix = ""
             max_cols = df.shape[1]
             
             for col_idx in range(start_col_idx, max_cols):
-                if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df):
-                    continue
-                
-                unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
-                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
-                    continue
+                if col_idx >= df.shape[1] or p_name_row_idx >= len(df): continue
                 
                 p_name_raw = str(df.iloc[p_name_row_idx, col_idx]).strip()
-                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test", "'", "color"]: 
+                if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "'"]: 
                     continue
                 
-                # Module 분석 모드 접두사 격리
-                if self.data_mode == "Module":
-                    if "scan" in p_name_raw.lower(): continue
-                    if p_name_raw.upper().startswith("CONT_"):
-                        cont_prefix = p_name_raw.upper().split('_')[1]
-                        continue
+                cond_val = ""
+                if cond_row_idx < len(df):
+                    cond_val = str(df.iloc[cond_row_idx, col_idx]).strip()
+                    if pd.isna(df.iloc[cond_row_idx, col_idx]) or cond_val.lower() in ["nan", "'"]: cond_val = ""
                 
-                p_name_final = p_name_raw
-                
-                # Module 모드일 경우에만 추가 접미사 결합 처리
-                if self.data_mode == "Module":
-                    sub_name_idx = p_name_row_idx + 3
-                    if sub_name_idx < len(df):
-                        sub_val = str(df.iloc[sub_name_idx, col_idx]).strip()
-                        if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan" and sub_val != "0" and sub_val != "'":
-                            sub_val_clean = re.sub(r'[\s]+', '', sub_val)
-                            if sub_val_clean and not sub_val_clean.replace('.','').isdigit():
-                                p_name_final = f"{p_name_raw}_{sub_val_clean}"
-                    if cont_prefix:
-                        p_name_final = f"{cont_prefix}_{p_name_final}"
+                unit_val = "unit"
+                if unit_row_idx < len(df):
+                    unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
+                    if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: unit_val = ""
+
+                p_name_key = p_name_raw.upper()
+                if cond_val:
+                    p_name_final = f"{p_name_key}_{cond_val.upper()}"
+                else:
+                    p_name_final = p_name_key
                 
                 vals = []
                 for r_pos in data_row_positions:
-                    if r_pos < len(df):
-                        vals.append(df.iloc[r_pos, col_idx])
-                    else:
-                        vals.append(np.nan)
+                    if r_pos < len(df): vals.append(df.iloc[r_pos, col_idx])
+                    else: vals.append(np.nan)
                 vals = pd.to_numeric(vals, errors='coerce').tolist()
                 
                 if not all(v is None or np.isnan(v) for v in vals):
-                    p_dict[p_name_final] = {'unit': unit_val, 'values': vals, 'units_map': units}
+                    p_dict[p_name_final] = {
+                        'raw_name': p_name_raw, 'cond': cond_val, 'unit': unit_val, 'values': vals, 'units_map': units
+                    }
                     all_p.add(p_name_final)
             
             if p_dict:
@@ -294,7 +296,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("선택하신 데이터 내에서 정상적인 측정 파라미터를 발굴하지 못했습니다.")
+            raise ValueError("정상적인 파라미터 및 측정 데이터를 발굴하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -304,7 +306,7 @@ class DataAnalysisApp(tk.Tk):
             f_meta = self.raw_files_data[self.lot_groups[g_key][0]]
             self.lot_display_names[g_key] = f"{f_meta['test_item']}_{f_meta['lot_id']}"
             
-        self.after(0, pb.update_progress, total_files, total_files, "파싱 완료")
+        self.after(0, pb.update_progress, total_files, total_files, "가상화 파싱 완료")
         self.after(250, self.init_analysis_menu)
 
     def init_analysis_menu(self):
@@ -354,10 +356,9 @@ class DataAnalysisApp(tk.Tk):
     def run_with_progress_pop(self, title_text, target_func):
         pb = AutoClosingProgressPop(self, title_text)
         def run():
-            self.after(50, lambda: pb.update_progress(30, 100, "데이터 정렬 중..."))
-            self.after(150, lambda: pb.update_progress(60, 100, "행렬 매칭 연산 중..."))
+            self.after(30, lambda: pb.update_progress(50, 100, "행렬 정렬 중..."))
             target_func()
-            self.after(250, lambda: pb.update_progress(100, 100, "완료되었습니다!"))
+            self.after(50, lambda: pb.update_progress(100, 100, "완료되었습니다!"))
         threading.Thread(target=run, daemon=True).start()
 
     def _on_mouse_wheel(self, event):
@@ -373,17 +374,21 @@ class DataAnalysisApp(tk.Tk):
 
     def build_chart_data_structures(self, target_group_key):
         lot_files = self.lot_groups[target_group_key]
-        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#e31a1c', '#33a02c', '#fdbf6f', '#cab2d6', '#6a3d9a']
+        base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         
         line_plots_meta = []
         box_plots_meta = []
 
         for param in self.selected_parameters:
-            unit_str = ""
+            unit_str, raw_name, cond_str = "", "", ""
             for fn in lot_files:
                 if param in self.raw_files_data[fn]['params']:
-                    unit_str = self.raw_files_data[fn]['params'][param]['unit']; break
-            if not unit_str: continue
+                    meta = self.raw_files_data[fn]['params'][param]
+                    unit_str = meta['unit']
+                    raw_name = meta['raw_name']
+                    cond_str = meta['cond']
+                    break
+            if not raw_name: continue
 
             master_map = {} 
             all_samples_set = set()
@@ -443,13 +448,21 @@ class DataAnalysisApp(tk.Tk):
 
             if lines_dataset:
                 display_unit = "%" if self.is_delta_mode.get() else unit_str
+                title_formatter = f"{raw_name}_{cond_str} ({display_unit})" if cond_str else f"{raw_name} ({display_unit})"
                 line_plots_meta.append({
-                    'param': param, 'title': f"{param} ({display_unit})", 'dataset': lines_dataset, 'all_samples': [s for s in all_samples if s not in del_set]
+                    'param': param, 'title': title_formatter, 'dataset': lines_dataset, 'all_samples': [s for s in all_samples if s not in del_set]
                 })
 
         for param in self.selected_parameters:
             b_data, a_labels, b_cols, stats_data = [], [], [], []
             del_set = self.deleted_units.get((target_group_key, param), set())
+            raw_name, cond_str = "", ""
+            
+            for fn in lot_files:
+                if param in self.raw_files_data[fn]['params']:
+                    raw_name = self.raw_files_data[fn]['params'][param]['raw_name']
+                    cond_str = self.raw_files_data[fn]['params'][param]['cond']
+                    break
 
             for f_idx, fn in enumerate(lot_files):
                 if param in self.raw_files_data[fn]['params']:
@@ -461,14 +474,12 @@ class DataAnalysisApp(tk.Tk):
                         b_cols.append(base_colors[f_idx % len(base_colors)])
                         
                         stats_data.append({
-                            'ro': self.raw_files_data[fn]['ro'],
-                            'min': np.min(vals),
-                            'max': np.max(vals),
-                            'avg': np.mean(vals),
-                            'std': np.std(vals)
+                            'ro': self.raw_files_data[fn]['ro'], 'min': np.min(vals), 'max': np.max(vals), 'avg': np.mean(vals), 'std': np.std(vals)
                         })
             
-            if b_data: box_plots_meta.append({'title': f"{param} Dist", 'b_data': b_data, 'a_labels': a_labels, 'b_cols': b_cols, 'stats_data': stats_data})
+            if b_data: 
+                box_title = f"{raw_name}_{cond_str} Dist" if cond_str else f"{raw_name} Dist"
+                box_plots_meta.append({'title': box_title, 'b_data': b_data, 'a_labels': a_labels, 'b_cols': b_cols, 'stats_data': stats_data, 'chart_key': param})
 
         return line_plots_meta, box_plots_meta
 
@@ -487,12 +498,16 @@ class DataAnalysisApp(tk.Tk):
             rename_f.pack(side=tk.RIGHT, padx=15)
             ent = tk.Entry(rename_f, width=25, font=("맑은 고딕", 9))
             ent.insert(0, self.lot_display_names[g_key]); ent.pack(side=tk.LEFT, padx=5)
-            tk.Button(rename_f, text="제목 변경", font=("맑은 고딕", 8, "bold"), bg="#546e7a", fg="white", command=lambda k=g_key, e=ent: self.update_lot_name(k, e.get())).pack(side=tk.LEFT)
+            
+            # [수정] 제목 변경 클릭 시에도 팝업창 연동 가동
+            tk.Button(rename_f, text="제목 변경", font=("맑은 고딕", 8, "bold"), bg="#546e7a", fg="white", 
+                      command=lambda k=g_key, e=ent: self.run_with_progress_pop("그룹 타이틀 변경 중", lambda: self.update_lot_name(k, e.get()))).pack(side=tk.LEFT)
             
             if line_meta:
                 grid_frame = tk.Frame(self.scrollable_frame)
                 grid_frame.pack(fill=tk.X, padx=15, pady=5)
-                cols = 3
+                
+                cols = 1 if self.data_mode == "Discrete" else 3
                 for c in range(cols): grid_frame.grid_columnconfigure(c, weight=1)
                 
                 for idx, m in enumerate(line_meta):
@@ -512,13 +527,15 @@ class DataAnalysisApp(tk.Tk):
                     ent_max = tk.Entry(input_f, width=5, font=("Consolas", 8))
                     ent_max.insert(0, cur_lim["max"]); ent_max.pack(side=tk.LEFT, padx=2)
                     
-                    fig, ax = plt.subplots(figsize=(4.2, 3.4))
+                    fig_w = 13.2 if self.data_mode == "Discrete" else 4.2
+                    fig, ax = plt.subplots(figsize=(fig_w, 3.4))
                     
                     if cur_lim["min"] != "": ax.set_ylim(bottom=float(cur_lim["min"]))
                     if cur_lim["max"] != "": ax.set_ylim(top=float(cur_lim["max"]))
                     
+                    # [수정] Y축 범위 수동 개별 적용할 때도 팝업창 규칙 엄격 연동
                     tk.Button(input_f, text="적용", font=("맑은 고딕", 7, "bold"), bg="#34495e", fg="white",
-                              command=lambda cid=chart_id, emin=ent_min, emax=ent_max: self.apply_individual_y_limit(cid, emin.get(), emax.get())).pack(side=tk.LEFT, padx=5)
+                              command=lambda cid=chart_id, emin=ent_min, emax=ent_max: self.run_with_progress_pop("Y축 스케일 범위 연산 및 재적용 중", lambda: self.apply_individual_y_limit(cid, emin.get(), emax.get()))).pack(side=tk.LEFT, padx=5)
                     
                     for px, py, pc, pm, ro_lbl, b_col in m['dataset']:
                         ax.plot(px, py, color=b_col, alpha=0.7, linewidth=1.5, zorder=1, label=ro_lbl)
@@ -527,8 +544,25 @@ class DataAnalysisApp(tk.Tk):
                             sc.__dict__['metadata'] = {'group_key': g_key, 'param': m['param'], 'unit': xi, 'ro': ro_lbl}
                     
                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=9, weight='bold')
-                    ax.set_xticks(range(len(m['all_samples'])))
-                    ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=7)
+                    
+                    if self.data_mode == "Discrete":
+                        tick_positions, tick_labels = [], []
+                        for s_idx, s_name in enumerate(m['all_samples']):
+                            try:
+                                num_val = int(re.findall(r'\d+', s_name)[0])
+                                if num_val % 2 == 0:
+                                    tick_positions.append(s_idx)
+                                    tick_labels.append(s_name)
+                            except:
+                                if s_idx % 2 == 1:
+                                    tick_positions.append(s_idx)
+                                    tick_labels.append(s_name)
+                        ax.set_xticks(tick_positions)
+                        ax.set_xticklabels(tick_labels, rotation=0, fontsize=7)
+                    else:
+                        ax.set_xticks(range(len(m['all_samples'])))
+                        ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=7)
+                        
                     ax.grid(True, linestyle=":", alpha=0.5)
                     
                     handles, labels = ax.get_legend_handles_labels()
@@ -544,11 +578,13 @@ class DataAnalysisApp(tk.Tk):
             if box_meta:
                 box_frame = tk.Frame(self.scrollable_frame, bg="#f9f9f9")
                 box_frame.pack(fill=tk.X, padx=15, pady=10)
-                for c in range(4): box_frame.grid_columnconfigure(c, weight=1)
+                
+                box_cols = 4
+                for c in range(box_cols): box_frame.grid_columnconfigure(c, weight=1)
                 
                 for idx, m in enumerate(box_meta):
                     bb = tk.Frame(box_frame, bd=1, relief=tk.GROOVE, bg="white")
-                    bb.grid(row=idx//4, column=idx%4, padx=5, pady=5, sticky="nsew")
+                    bb.grid(row=idx//box_cols, column=idx%box_cols, padx=5, pady=5, sticky="nsew")
                     
                     input_f = tk.Frame(bb, bg="white")
                     input_f.pack(fill=tk.X, padx=5, pady=2)
@@ -563,33 +599,31 @@ class DataAnalysisApp(tk.Tk):
                     ent_max = tk.Entry(input_f, width=5, font=("Consolas", 8))
                     ent_max.insert(0, cur_lim["max"]); ent_max.pack(side=tk.LEFT, padx=2)
                     
-                    fig, (ax, ax_stat) = plt.subplots(2, 1, figsize=(3.3, 4.3), gridspec_kw={'height_ratios': [2.2, 1.5]})
+                    fig, ax = plt.subplots(figsize=(3.3, 2.6))
                     
                     if cur_lim["min"] != "": ax.set_ylim(bottom=float(cur_lim["min"]))
                     if cur_lim["max"] != "": ax.set_ylim(top=float(cur_lim["max"]))
                     
                     tk.Button(input_f, text="적용", font=("맑은 고딕", 7, "bold"), bg="#34495e", fg="white",
-                              command=lambda cid=chart_id, emin=ent_min, emax=ent_max: self.apply_individual_y_limit(cid, emin.get(), emax.get())).pack(side=tk.LEFT, padx=5)
+                              command=lambda cid=chart_id, emin=ent_min, emax=ent_max: self.run_with_progress_pop("Y축 스케일 범위 연산 및 재적용 중", lambda: self.apply_individual_y_limit(cid, emin.get(), emax.get()))).pack(side=tk.LEFT, padx=5)
                     
                     bp = ax.boxplot(m['b_data'], patch_artist=True)
                     ax.set_xticklabels(m['a_labels'], fontsize=8)
                     for patch, color in zip(bp['boxes'], m['b_cols']):
                         patch.set_facecolor(color); patch.set_alpha(0.6)
-                    ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=9, weight='bold')
+                    ax.set_title(f"{m['title']}", fontsize=9, weight='bold')
                     ax.grid(True, alpha=0.3)
                     
-                    ax_stat.axis('off')
-                    
-                    for b_idx, s in enumerate(m['stats_data']):
-                        x_pos = b_idx + 1
-                        stat_text = f"[{s['ro']}]\nMin:{s['min']:.2f}\nMax:{s['max']:.2f}\nAVG:{s['avg']:.2f}\nSTD:{s['std']:.2f}"
-                        ax.text(x_pos, -0.15, stat_text, transform=ax.get_xaxis_transform(),
-                                fontsize=7, fontfamily="Consolas", ha='center', va='top',
-                                bbox=dict(boxstyle='square,pad=0.2', facecolor='#fafafa', edgecolor='#dddddd', alpha=0.8))
-                    
                     plt.tight_layout()
-                    FigureCanvasTkAgg(fig, master=bb).get_tk_widget().pack()
+                    FigureCanvasTkAgg(fig, master=bb).get_tk_widget().pack(fill=tk.BOTH, expand=True)
                     plt.close(fig)
+                    
+                    stat_table_frame = tk.Frame(bb, bg="#fafafa", bd=1, relief=tk.SOLID)
+                    stat_table_frame.pack(fill=tk.X, padx=4, pady=4)
+                    
+                    for s_idx, s in enumerate(m['stats_data']):
+                        lbl_text = f"[{s['ro']}] Min:{s['min']:.2f} | Max:{s['max']:.2f} | AVG:{s['avg']:.2f} | STD:{s['std']:.2f}"
+                        tk.Label(stat_table_frame, text=lbl_text, font=("Consolas", 7), bg="#fafafa", anchor="w").pack(fill=tk.X, padx=2)
 
     def apply_individual_y_limit(self, chart_id, ymin, ymax):
         self.individual_limits[chart_id] = {"min": ymin.strip(), "max": ymax.strip()}
@@ -652,7 +686,7 @@ class DataAnalysisApp(tk.Tk):
     def update_lot_name(self, g_key, new_name):
         if not new_name.strip(): return
         self.lot_display_names[g_key] = new_name.strip()
-        self.run_with_progress_pop("그룹 타이틀 변경 중", self.execute_ui_rendering)
+        self.execute_ui_rendering()
 
     def return_to_home_screen(self):
         if messagebox.askyesno("화면 초기화", "분석을 종료하고 처음 파일 선택 화면으로 이동하시겠습니까?"):
@@ -669,7 +703,7 @@ class DataAnalysisApp(tk.Tk):
                 messagebox.showerror("수정 불가", "동일한 이름의 PDF 리포트 파일이 열려 있습니다.\n닫고 다시 시도하세요.")
                 return
 
-        pb = AutoClosingProgressPop(self, "PDF 리포트 저장 중")
+        pb = AutoClosingProgressPop(self, "PDF 리포트 가로 포맷 저장 중")
         
         def pdf_thread():
             try:
@@ -678,11 +712,11 @@ class DataAnalysisApp(tk.Tk):
                     total_steps = len(groups)
                     
                     for step, g_key in enumerate(groups):
-                        self.after(0, pb.update_progress, int((step/total_steps)*100), 100, f"[{g_key}] 컴파일 중...")
+                        self.after(0, pb.update_progress, int((step/total_steps)*100), 100, f"[{g_key}] 가로 벡터 변환 중...")
                         line_meta, box_meta = self.build_chart_data_structures(g_key)
                         
                         if line_meta:
-                            cols, rows, items_per_page = (3, 3, 9)
+                            cols, rows, items_per_page = (1, 3, 3) if self.data_mode == "Discrete" else (3, 3, 9)
                             for i in range(0, len(line_meta), items_per_page):
                                 chunk = line_meta[i:i+items_per_page]
                                 fig, axes = plt.subplots(rows, cols, figsize=(11, 8.5), squeeze=False)
@@ -702,10 +736,22 @@ class DataAnalysisApp(tk.Tk):
                                             ax.scatter(xi, yi, color=ci, marker=mi, s=40 if mi=='^' else 20)
                                     
                                     ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=8, weight='bold')
-                                    ax.set_xticks(range(len(m['all_samples'])))
-                                    ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=6)
-                                    ax.grid(True, linestyle=":", alpha=0.4)
                                     
+                                    if self.data_mode == "Discrete":
+                                        tick_pos, tick_lbl = [], []
+                                        for s_idx, s_name in enumerate(m['all_samples']):
+                                            try:
+                                                if int(re.findall(r'\d+', s_name)[0]) % 2 == 0:
+                                                    tick_pos.append(s_idx); tick_lbl.append(s_name)
+                                            except:
+                                                if s_idx % 2 == 1: tick_pos.append(s_idx); tick_lbl.append(s_name)
+                                        ax.set_xticks(tick_pos)
+                                        ax.set_xticklabels(tick_lbl, fontsize=6)
+                                    else:
+                                        ax.set_xticks(range(len(m['all_samples'])))
+                                        ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=6)
+                                        
+                                    ax.grid(True, linestyle=":", alpha=0.4)
                                     handles, labels = ax.get_legend_handles_labels()
                                     by_label = dict(zip(labels, handles))
                                     if by_label: ax.legend(by_label.values(), by_label.keys(), loc="best", fontsize=5)
@@ -735,7 +781,7 @@ class DataAnalysisApp(tk.Tk):
                                     for patch, color in zip(bp['boxes'], m['b_cols']):
                                         patch.set_facecolor(color); patch.set_alpha(0.5)
                                         
-                                    ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=8, weight='bold')
+                                    ax.set_title(f"{m['title']}", fontsize=8, weight='bold')
                                     ax.grid(True, alpha=0.3)
                                     
                                     for b_idx, s in enumerate(m['stats_data']):
@@ -749,11 +795,11 @@ class DataAnalysisApp(tk.Tk):
                                 pdf.savefig(fig, dpi=200)
                                 plt.close(fig)
                                 
-                self.after(0, pb.update_progress, 100, 100, "완료")
-                self.after(300, lambda: messagebox.showinfo("Success", "매칭 PDF 저장이 완료되었습니다."))
+                    self.after(0, pb.update_progress, 100, 100, "완료")
+                    self.after(300, lambda: messagebox.showinfo("Success", "매칭 PDF 저장이 완료되었습니다."))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("PDF Export Error", f"PDF 컴파일 에러:\n{str(e)}"))
-                if pb.winfo_exists(): pb.destroy()
+                self.after(0, pb.safe_destroy)
 
         threading.Thread(target=pdf_thread, daemon=True).start()
 
