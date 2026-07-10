@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v19.0 - [Pure Filename Engine]")
+        self.title("Reliability Data Analyzer v20.0 - [Plus Premium Master]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -98,9 +98,10 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
-        # [핵심 변경]: 내부 데이터를 일절 보지 않고 오직 겉으로 보이는 'filename' 자체만 뜯어서 분석합니다.
+        # [핵심 변경 규칙 1, 2 반영]: 파일 내부는 완전히 무시하고 오직 겉으로 보이는 파일명만 봅니다.
+        # 확장자를 뺀 순수 파일명을 대문자로 정제한 뒤 사용자가 지정한 '+' 기호로 분리합니다.
         name_we = os.path.splitext(filename)[0].upper()
-        tokens = [t.strip() for t in re.split(r'[\s_\-]+', name_we) if t.strip()]
+        tokens = [t.strip() for t in name_we.split('+') if t.strip()]
         
         rel_keywords = [
             "D-H3TRB", "H3TRB", "HTGB+", "HTGB-", "HTGB", "HTRB", "THBT", "THB", "THU", 
@@ -108,45 +109,53 @@ class DataAnalysisApp(tk.Tk):
             "IOL", "VIB", "DGS", "DRB", "HTS", "LTS", "MS", "PC", "PRECON", "TC"
         ]
         
-        # 1. 순수 파일명 토큰에서 신뢰성 이름 추출
         test_item = "RELIABILITY_TEST"
-        for kw in rel_keywords:
-            if kw in tokens:
-                test_item = kw
-                break
-        if test_item == "RELIABILITY_TEST" and tokens:
-            test_item = tokens[0]
-            
-        # 2. 순수 파일명 토큰에서 Read-out 시간대 추출
-        ro_str = "0HR"
+        ro_str = ""
         ro_num = 0
-        ro_match = re.search(r'(\d+\s*(?:HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST))', name_we, re.IGNORECASE)
-        if ro_match:
-            ro_str = ro_match.group(1).upper().replace(" ", "")
-            ro_num = int(re.findall(r'\d+', ro_str)[0])
-        else:
+        
+        # 순서가 무작위로 섞여도 지능적으로 추출하기 위한 분류 파트 가동
+        # A. 단어 목록 중 숫자+HR 또는 숫자+CYC 패턴이 있다면 순서 불문 무조건 Read-out으로 확정
+        for t in tokens:
+            ro_match = re.search(r'(\d+)\s*(HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST)', t, re.IGNORECASE)
+            if ro_match:
+                ro_num = int(ro_match.group(1))
+                ro_str = t.lower()
+                break
+        if not ro_str:
             for t in tokens:
                 digits = re.findall(r'\d+', t)
-                if digits and t != test_item:
+                if digits and len(t) < 6:
                     ro_num = int(digits[0])
-                    ro_str = f"{ro_num}HR"
+                    ro_str = f"{ro_num}hr"
                     break
-                    
-        # 3. 신뢰성 이름과 시간대를 제외한 나머지 토큰을 LOT 번호로 지정 ('3T' 버그 원천 봉쇄)
-        lot_tokens = [t for t in tokens if t != test_item and t != ro_str]
-        lot_str = "UNKNOWN_LOT"
-        for lt in lot_tokens:
-            if "LOT" in lt:
-                lot_str = lt
+        if not ro_str:
+            ro_str = "0hr"
+
+        # B. 단어 목록 중 사전에 선언된 단어가 있다면 순서 불문 무조건 신뢰성 이름으로 확정
+        for t in tokens:
+            if t in rel_keywords:
+                test_item = t
                 break
-        if lot_str == "UNKNOWN_LOT" and lot_tokens:
-            lot_str = "_".join(lot_tokens)
+        if test_item == "RELIABILITY_TEST" and tokens:
+            for t in tokens:
+                if t.lower() != ro_str:
+                    test_item = t
+                    break
+
+        # C. 위 두 가지로 식별된 조각을 제외한 나머지 단어는 순서 불문 무조건 LOT 번호로 결합 귀속
+        lot_tokens = [t for t in tokens if t != test_item and t.lower() != ro_str]
+        if lot_tokens:
+            lot_str = "+".join(lot_tokens)
+        else:
+            lot_str = "UNKNOWN_LOT"
             
         group_key = f"{test_item}_{lot_str}"
-        return group_key, ro_str.lower(), ro_num, test_item, lot_str
+        return group_key, ro_str, ro_num, test_item, lot_str
 
     def full_load_dataframe(self, path):
-        if path.endswith('.csv'):
+        # 백지화 예방을 위해 대소문자 무관 확장자 판별 엔진 통합
+        path_lower = path.lower()
+        if path_lower.endswith('.csv'):
             try: return pd.read_csv(path, header=None, engine='c', on_bad_lines='skip')
             except: return pd.read_csv(path, header=None, engine='python')
         else:
@@ -184,7 +193,7 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"파일 파싱 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"파일 구조 파싱 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
@@ -282,7 +291,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("단위가 존재하는 유효한 파라미터 데이터를 추출하지 못했습니다.")
+            raise ValueError("선택하신 데이터 내에서 단위가 지정된 유효 파라미터를 식별하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -467,7 +476,7 @@ class DataAnalysisApp(tk.Tk):
                     cell = tk.Frame(grid_frame, bd=1, relief=tk.RIDGE, bg="white")
                     cell.grid(row=idx//cols, column=idx%cols, padx=4, pady=4, sticky="nsew")
                     
-                    # [요청 규칙 1]: 개별 조절 UI 폼 상단 추가
+                    # [요청 규칙 1]: 개별 조절 UI 폼 배치 적용
                     input_f = tk.Frame(cell, bg="white")
                     input_f.pack(fill=tk.X, padx=5, pady=2)
                     tk.Label(input_f, text=f"Y축 범위:", bg="white", font=("맑은 고딕", 8)).pack(side=tk.LEFT)
@@ -519,7 +528,6 @@ class DataAnalysisApp(tk.Tk):
                     bb = tk.Frame(box_frame, bd=1, relief=tk.GROOVE, bg="white")
                     bb.grid(row=idx//4, column=idx%4, padx=5, pady=5, sticky="nsew")
                     
-                    # 개별 조절 UI 폼 박스 연동
                     input_f = tk.Frame(bb, bg="white")
                     input_f.pack(fill=tk.X, padx=5, pady=2)
                     tk.Label(input_f, text=f"Y축 범위:", bg="white", font=("맑은 고딕", 8)).pack(side=tk.LEFT)
@@ -550,7 +558,7 @@ class DataAnalysisApp(tk.Tk):
                     
                     ax_stat.axis('off')
                     
-                    # [요청 규칙 1]: 세로방향 1set(Min->Max->AVG->STD) 수직 배치 정렬
+                    # [요청 규칙 1]: 세로방향 1set(Min->Max->AVG->STD) 완벽 정렬 수하 배치
                     for b_idx, s in enumerate(m['stats_data']):
                         x_pos = b_idx + 1
                         stat_text = f"[{s['ro']}]\nMin:{s['min']:.2f}\nMax:{s['max']:.2f}\nAVG:{s['avg']:.2f}\nSTD:{s['std']:.2f}"
@@ -687,7 +695,7 @@ class DataAnalysisApp(tk.Tk):
                                 plt.close(fig)
                                 
                         if box_meta:
-                            # [요청 규칙 2]: 무조건 4개 * 3줄 = 12개 픽스 페이지 그리드 컴파일
+                            # [요청 규칙 2]: 무조건 4개 * 3줄 = 12개 픽스 페이지 그리드 컴파일 고정
                             b_cols, b_rows, b_items_per_page = 4, 3, 12
                             for i in range(0, len(box_meta), b_items_per_page):
                                 chunk = box_meta[i:i+b_items_per_page]
