@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v23.0 - [Plus Absolute Stream]")
+        self.title("Reliability Data Analyzer v21.0 - [Plus Absolute Fixed Suite]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -87,6 +87,7 @@ class DataAnalysisApp(tk.Tk):
         hs = win.winfo_screenheight()
         x = (ws / 2) - (w / 2)
         y = (hs / 2) - (h / 2)
+        win.geometry(f'{w}+{"h"}+{int(x)}+{int(y)}')
         win.geometry(f'{w}x{h}+{int(x)}+{int(y)}')
 
     def init_upload_menu(self):
@@ -98,7 +99,6 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
-        # 대소문자 완전 무시 및 기계적 + 기호 기반 3분할 맵핑 고정
         name_we = os.path.splitext(filename)[0].upper()
         tokens = [t.strip() for t in name_we.split('+') if t.strip()]
         
@@ -112,7 +112,6 @@ class DataAnalysisApp(tk.Tk):
         ro_str = ""
         ro_num = 0
         
-        # 1. 시간대(Read-out) 추출
         for t in tokens:
             ro_match = re.search(r'(\d+)\s*(HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST)', t, re.IGNORECASE)
             if ro_match:
@@ -129,7 +128,6 @@ class DataAnalysisApp(tk.Tk):
         if not ro_str:
             ro_str = "0hr"
 
-        # 2. 신뢰성 키워드 매칭
         for t in tokens:
             if t in rel_keywords:
                 test_item = t
@@ -140,7 +138,6 @@ class DataAnalysisApp(tk.Tk):
                     test_item = t
                     break
 
-        # 3. 제품군(LOT) 명확한 잔여 문자열 할당
         lot_tokens = [t for t in tokens if t != test_item and t.lower() != ro_str]
         if lot_tokens:
             lot_str = "+".join(lot_tokens)
@@ -190,7 +187,7 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"파일 구문 독립 분석 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"파일 구조 분석 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
@@ -201,10 +198,11 @@ class DataAnalysisApp(tk.Tk):
             test_no_row_idx = None
             start_col_idx = None
             
-            for i in range(min(60, len(df))):
+            # 1열(인덱스 0) 기준 키워드 자동 행 추적 매칭 강화
+            for i in range(min(100, len(df))):
                 col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
                 if "parameter" in col0_str:
-                    p_name_row_idx = i + 1  
+                    p_name_row_idx = i
                     for c_idx in range(df.shape[1]):
                         if re.match(r'^t1$', str(df.iloc[i, c_idx]).strip(), re.IGNORECASE):
                             start_col_idx = c_idx
@@ -214,13 +212,17 @@ class DataAnalysisApp(tk.Tk):
                 if "testno" in col0_str:
                     test_no_row_idx = i
 
+            # 1열 매칭 실패 시 백업용 기본값 처리 규칙 유지
             if p_name_row_idx is None: p_name_row_idx = 19
+            else: p_name_row_idx = p_name_row_idx + 1 # 실제 파라미터명 이름이 있는 행 위치 보정
+            
             if unit_row_idx is None: unit_row_idx = 26
             if test_no_row_idx is None: test_no_row_idx = 46
             if start_col_idx is None: start_col_idx = 7
 
             if test_no_row_idx >= len(df): continue
             
+            # 시료 번호 추출 (1열에서 숫자 형태 데이터 행 파싱)
             units = []
             data_row_positions = []
             for i in range(test_no_row_idx + 1, len(df)):
@@ -250,23 +252,26 @@ class DataAnalysisApp(tk.Tk):
                 if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test", "'", "color"]: 
                     continue
                 
+                # Module 분석 모드 전용 접두사 코드 격리
                 if self.data_mode == "Module":
                     if "scan" in p_name_raw.lower(): continue
                     if p_name_raw.upper().startswith("CONT_"):
                         cont_prefix = p_name_raw.upper().split('_')[1]
                         continue
                 
-                sub_name_idx = p_name_row_idx + 3
                 p_name_final = p_name_raw
-                if sub_name_idx < len(df):
-                    sub_val = str(df.iloc[sub_name_idx, col_idx]).strip()
-                    if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan" and sub_val != "0" and sub_val != "'":
-                        sub_val_clean = re.sub(r'[\s]+', '', sub_val)
-                        if sub_val_clean and not sub_val_clean.replace('.','').isdigit():
-                            p_name_final = f"{p_name_raw}_{sub_val_clean}"
                 
-                if self.data_mode == "Module" and cont_prefix:
-                    p_name_final = f"{cont_prefix}_{p_name_final}"
+                # Module 모드일 때만 하위 세부 명칭 규칙을 엮어주어 구조적 혼선 차단
+                if self.data_mode == "Module":
+                    sub_name_idx = p_name_row_idx + 3
+                    if sub_name_idx < len(df):
+                        sub_val = str(df.iloc[sub_name_idx, col_idx]).strip()
+                        if pd.notna(df.iloc[sub_name_idx, col_idx]) and sub_val != "" and sub_val.lower() != "nan" and sub_val != "0" and sub_val != "'":
+                            sub_val_clean = re.sub(r'[\s]+', '', sub_val)
+                            if sub_val_clean and not sub_val_clean.replace('.','').isdigit():
+                                p_name_final = f"{p_name_raw}_{sub_val_clean}"
+                    if cont_prefix:
+                        p_name_final = f"{cont_prefix}_{p_name_final}"
                 
                 vals = []
                 for r_pos in data_row_positions:
@@ -281,7 +286,6 @@ class DataAnalysisApp(tk.Tk):
                     all_p.add(p_name_final)
             
             if p_dict:
-                # [백지화 버그 근본 패치 완료]: 파라미터 간 충돌을 방지하기 위해 파일 인덱스를 명확히 결합한 리스트 체인을 생성합니다.
                 unique_fname_key = f"{fname}_{idx}"
                 temp_data[unique_fname_key] = {'lot_key': group_key, 'ro': ro, 'ro_num': ro_n, 'params': p_dict, 'test_item': test_item, 'lot_id': lot_id}
                 if group_key not in self.lot_groups: 
@@ -289,7 +293,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("단위 컬럼이 정렬된 유효 파라미터를 발굴하지 못했습니다.")
+            raise ValueError("선택하신 데이터 내에서 정상적인 측정 파라미터를 발굴하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -487,7 +491,8 @@ class DataAnalysisApp(tk.Tk):
             if line_meta:
                 grid_frame = tk.Frame(self.scrollable_frame)
                 grid_frame.pack(fill=tk.X, padx=15, pady=5)
-                cols = 3 if self.data_mode == "Module" else 1
+                # Discrete 모드에서도 다중 파라미터를 격자형(3열)으로 보기 쉽게 정렬 적용
+                cols = 3
                 for c in range(cols): grid_frame.grid_columnconfigure(c, weight=1)
                 
                 for idx, m in enumerate(line_meta):
@@ -507,7 +512,7 @@ class DataAnalysisApp(tk.Tk):
                     ent_max = tk.Entry(input_f, width=5, font=("Consolas", 8))
                     ent_max.insert(0, cur_lim["max"]); ent_max.pack(side=tk.LEFT, padx=2)
                     
-                    fig, ax = plt.subplots(figsize=(4.2 if cols==3 else 13.0, 3.4))
+                    fig, ax = plt.subplots(figsize=(4.2, 3.4))
                     
                     if cur_lim["min"] != "": ax.set_ylim(bottom=float(cur_lim["min"]))
                     if cur_lim["max"] != "": ax.set_ylim(top=float(cur_lim["max"]))
@@ -644,6 +649,16 @@ class DataAnalysisApp(tk.Tk):
         elif action[0] == 'delete': self.deleted_units[action[1]].discard(action[2])
         self.execute_ui_rendering()
 
+    def update_lot_name(self, g_key, new_name):
+        if not new_name.strip(): return
+        self.lot_display_names[g_key] = new_name.strip()
+        self.run_with_progress_pop("그룹 타이틀 변경 중", self.execute_ui_rendering)
+
+    def return_to_home_screen(self):
+        if messagebox.askyesno("화면 초기화", "분석을 종료하고 처음 파일 선택 화면으로 이동하시겠습니까?"):
+            self.reset_internal_states()
+            self.init_upload_menu()
+
     def export_to_pdf(self):
         path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF 리포트 파일", "*.pdf")])
         if not path: return
@@ -667,7 +682,7 @@ class DataAnalysisApp(tk.Tk):
                         line_meta, box_meta = self.build_chart_data_structures(g_key)
                         
                         if line_meta:
-                            cols, rows, items_per_page = (3, 3, 9) if self.data_mode == "Module" else (1, 3, 3)
+                            cols, rows, items_per_page = (3, 3, 9)
                             for i in range(0, len(line_meta), items_per_page):
                                 chunk = line_meta[i:i+items_per_page]
                                 fig, axes = plt.subplots(rows, cols, figsize=(11, 8.5), squeeze=False)
@@ -701,7 +716,6 @@ class DataAnalysisApp(tk.Tk):
                                 plt.close(fig)
                                 
                         if box_meta:
-                            # 4개 * 3줄 = 12개 정형 그리드로 페이지 규격 왜곡 완전 차단
                             b_cols, b_rows, b_items_per_page = 4, 3, 12
                             for i in range(0, len(box_meta), b_items_per_page):
                                 chunk = box_meta[i:i+b_items_per_page]
@@ -745,9 +759,3 @@ class DataAnalysisApp(tk.Tk):
 
 if __name__ == "__main__":
     DataAnalysisApp().mainloop()
-
-# ==============================================================================
-# ★ [PLUS SUITE 마스터 가이드] 
-# 스크롤을 내린 상태에서 복사를 완료하시려면 코드 창 내부를 한 번 마우스로 클릭하신 후,
-# 키보드 단축키 [Ctrl + A] (전체 선택) 누르고, 이어서 [Ctrl + C] (복사)를 누르면 3초 만에 끝납니다!
-# ==============================================================================
