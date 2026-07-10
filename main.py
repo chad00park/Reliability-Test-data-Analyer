@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v20.0 - [Plus Premium Master]")
+        self.title("Reliability Data Analyzer v21.0 - [Plus Absolute Fixed Suite]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -98,8 +98,7 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
-        # [핵심 변경 규칙 1, 2 반영]: 파일 내부는 완전히 무시하고 오직 겉으로 보이는 파일명만 봅니다.
-        # 확장자를 뺀 순수 파일명을 대문자로 정제한 뒤 사용자가 지정한 '+' 기호로 분리합니다.
+        # [대소문자 완전 무시 핵심 규칙]: 파일명을 전체 대문자로 통일하고 사용자가 수정한 '+' 기호로 분리합니다.
         name_we = os.path.splitext(filename)[0].upper()
         tokens = [t.strip() for t in name_we.split('+') if t.strip()]
         
@@ -113,8 +112,7 @@ class DataAnalysisApp(tk.Tk):
         ro_str = ""
         ro_num = 0
         
-        # 순서가 무작위로 섞여도 지능적으로 추출하기 위한 분류 파트 가동
-        # A. 단어 목록 중 숫자+HR 또는 숫자+CYC 패턴이 있다면 순서 불문 무조건 Read-out으로 확정
+        # 1. 무작위 순서에서도 Read-out 시간대를 안전하게 판별
         for t in tokens:
             ro_match = re.search(r'(\d+)\s*(HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST)', t, re.IGNORECASE)
             if ro_match:
@@ -131,7 +129,7 @@ class DataAnalysisApp(tk.Tk):
         if not ro_str:
             ro_str = "0hr"
 
-        # B. 단어 목록 중 사전에 선언된 단어가 있다면 순서 불문 무조건 신뢰성 이름으로 확정
+        # 2. 사전에 지정된 신뢰성 키워드 매칭 스캔
         for t in tokens:
             if t in rel_keywords:
                 test_item = t
@@ -142,7 +140,7 @@ class DataAnalysisApp(tk.Tk):
                     test_item = t
                     break
 
-        # C. 위 두 가지로 식별된 조각을 제외한 나머지 단어는 순서 불문 무조건 LOT 번호로 결합 귀속
+        # 3. 시간대와 신뢰성 항목을 제외한 나머지는 패턴 형태에 상관없이 무조건 100% LOT 번호로 결합 귀속
         lot_tokens = [t for t in tokens if t != test_item and t.lower() != ro_str]
         if lot_tokens:
             lot_str = "+".join(lot_tokens)
@@ -153,9 +151,9 @@ class DataAnalysisApp(tk.Tk):
         return group_key, ro_str, ro_num, test_item, lot_str
 
     def full_load_dataframe(self, path):
-        # 백지화 예방을 위해 대소문자 무관 확장자 판별 엔진 통합
+        # 소문자 변환 후 안전 검사 가동으로 백지 예방 확장자 판별 엔진 통합
         path_lower = path.lower()
-        if path_lower.endswith('.csv'):
+        if path_lower.endswith('.csv') or '.csv' in path_lower:
             try: return pd.read_csv(path, header=None, engine='c', on_bad_lines='skip')
             except: return pd.read_csv(path, header=None, engine='python')
         else:
@@ -193,7 +191,7 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"파일 구조 파싱 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"파일 구조 분석 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
@@ -253,6 +251,7 @@ class DataAnalysisApp(tk.Tk):
                 if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test", "'", "color"]: 
                     continue
                 
+                # [치명적 버그 수정]: Discrete 분석 모드에서는 모듈용 접두사 코드 간섭을 완전 차단 격리
                 if self.data_mode == "Module":
                     if "scan" in p_name_raw.lower(): continue
                     if p_name_raw.upper().startswith("CONT_"):
@@ -291,7 +290,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("선택하신 데이터 내에서 단위가 지정된 유효 파라미터를 식별하지 못했습니다.")
+            raise ValueError("선택하신 데이터 내에서 정상적인 측정 파라미터를 발굴하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -347,6 +346,26 @@ class DataAnalysisApp(tk.Tk):
         self.canvas.bind_all("<MouseWheel>", self._on_mouse_wheel)
         
         self.run_with_progress_pop("초기 그래프 로딩 중", self.update_selections_and_render)
+
+    def run_with_progress_pop(self, title_text, target_func):
+        pb = AutoClosingProgressPop(self, title_text)
+        def run():
+            self.after(50, lambda: pb.update_progress(30, 100, "데이터 정렬 중..."))
+            self.after(150, lambda: pb.update_progress(60, 100, "행렬 매칭 연산 중..."))
+            target_func()
+            self.after(250, lambda: pb.update_progress(100, 100, "완료되었습니다!"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_mouse_wheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def update_selections_and_render(self):
+        selections = self.param_listbox.curselection()
+        sel_items = [self.param_listbox.get(i) for i in selections]
+        if "★ 전체 선택" in sel_items: self.selected_parameters = self.parameter_list.copy()
+        else: self.selected_parameters = [v for v in sel_items if v != "★ 전체 선택"]
+        if not self.selected_parameters: return
+        self.execute_ui_rendering()
 
     def build_chart_data_structures(self, target_group_key):
         lot_files = self.lot_groups[target_group_key]
@@ -476,7 +495,6 @@ class DataAnalysisApp(tk.Tk):
                     cell = tk.Frame(grid_frame, bd=1, relief=tk.RIDGE, bg="white")
                     cell.grid(row=idx//cols, column=idx%cols, padx=4, pady=4, sticky="nsew")
                     
-                    # [요청 규칙 1]: 개별 조절 UI 폼 배치 적용
                     input_f = tk.Frame(cell, bg="white")
                     input_f.pack(fill=tk.X, padx=5, pady=2)
                     tk.Label(input_f, text=f"Y축 범위:", bg="white", font=("맑은 고딕", 8)).pack(side=tk.LEFT)
@@ -558,7 +576,6 @@ class DataAnalysisApp(tk.Tk):
                     
                     ax_stat.axis('off')
                     
-                    # [요청 규칙 1]: 세로방향 1set(Min->Max->AVG->STD) 완벽 정렬 수하 배치
                     for b_idx, s in enumerate(m['stats_data']):
                         x_pos = b_idx + 1
                         stat_text = f"[{s['ro']}]\nMin:{s['min']:.2f}\nMax:{s['max']:.2f}\nAVG:{s['avg']:.2f}\nSTD:{s['std']:.2f}"
@@ -695,7 +712,6 @@ class DataAnalysisApp(tk.Tk):
                                 plt.close(fig)
                                 
                         if box_meta:
-                            # [요청 규칙 2]: 무조건 4개 * 3줄 = 12개 픽스 페이지 그리드 컴파일 고정
                             b_cols, b_rows, b_items_per_page = 4, 3, 12
                             for i in range(0, len(box_meta), b_items_per_page):
                                 chunk = box_meta[i:i+b_items_per_page]
@@ -739,3 +755,8 @@ class DataAnalysisApp(tk.Tk):
 
 if __name__ == "__main__":
     DataAnalysisApp().mainloop()
+
+# ==============================================================================
+# ★ [PLUS SUITE 전용 가이드] 마우스 드래그 및 전체 코드를 한 번에 복사하려면 
+# 이 주석 줄부터 코드 맨 위 첫 줄까지 전체 선택(Ctrl+A)하여 간편하게 붙여넣으십시오.
+# ==============================================================================
