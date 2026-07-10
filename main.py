@@ -11,6 +11,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 matplotlib.rcParams['axes.unicode_minus'] = False
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.ticker as ticker
 import matplotlib.pyplot as plt
 
 try:
@@ -180,7 +181,7 @@ class DataAnalysisApp(tk.Tk):
         self.data_mode = mode
         win.destroy()
         
-        pb = AutoClosingProgressPop(self, "데이터 구조 가상화 및 연산 중")
+        pb = AutoClosingProgressPop(self, "데이터 가상화 정렬 및 다중 병합 연산 중")
         def target_thread():
             try:
                 self.process_files(files, pb)
@@ -195,19 +196,17 @@ class DataAnalysisApp(tk.Tk):
         
         for idx, path in enumerate(files):
             fname = os.path.basename(path)
-            self.after(0, pb.update_progress, idx, total_files, f"격자 행렬 매칭 스캔 중 ({idx+1}/{total_files})")
+            self.after(0, pb.update_progress, idx, total_files, f"격자 주소 공간 동기화 중 ({idx+1}/{total_files})")
             
             group_key, ro, ro_n, test_item, lot_id = self.parse_filename_info(fname)
             df = self.full_load_dataframe(path)
             if df.empty: continue
             
             base_row_idx = None
-            unit_row_idx = None
             test_no_row_idx = None
             start_col_idx = None
             
             for i in range(min(120, len(df))):
-                col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
                 found_t1 = False
                 for c_idx in range(df.shape[1]):
                     if re.match(r'^t1$', str(df.iloc[i, c_idx]).strip(), re.IGNORECASE):
@@ -222,13 +221,14 @@ class DataAnalysisApp(tk.Tk):
                     col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
                     if "parameter" in col0_str: base_row_idx = i
             
+            # [수정] 오프셋 규칙 정밀 고정 (N=기준행, N+1=파라미터명, N+4=테스트조건, N+7=단위행)
             if base_row_idx is not None:
                 p_name_row_idx = base_row_idx + 1
-                cond_row_idx = base_row_idx + 3
+                cond_row_idx = base_row_idx + 4  # N + 4 고정 적용 완료
                 unit_row_idx = base_row_idx + 7
                 test_no_row_idx = base_row_idx + 27 if base_row_idx + 27 < len(df) else base_row_idx + 10
             else:
-                p_name_row_idx, cond_row_idx, unit_row_idx, test_no_row_idx = 20, 22, 26, 46
+                p_name_row_idx, cond_row_idx, unit_row_idx, test_no_row_idx = 20, 23, 26, 46
             
             for i in range(min(120, len(df))):
                 col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
@@ -252,25 +252,42 @@ class DataAnalysisApp(tk.Tk):
             
             p_dict = {}
             max_cols = df.shape[1]
+            current_cont_prefix = "" # [수정] Module 스캔 시 CONT_ 접두사를 누적 유지할 상태 변수
             
             for col_idx in range(start_col_idx, max_cols):
-                if col_idx >= df.shape[1] or p_name_row_idx >= len(df): continue
+                if col_idx >= df.shape[1] or p_name_row_idx >= len(df) or unit_row_idx >= len(df): continue
+                
+                # 단위 데이터 추출 및 검사
+                unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
+                if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: 
+                    unit_val = ""
                 
                 p_name_raw = str(df.iloc[p_name_row_idx, col_idx]).strip()
                 if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "'"]: 
                     continue
                 
+                # [수정] Module 전용 CONT_ 접두사 추출 및 상태 전파 전력 스캔 규칙
+                if self.data_mode == "Module":
+                    if p_name_raw.upper().startswith("CONT_"):
+                        tokens_cont = p_name_raw.upper().split('_')
+                        if len(tokens_cont) > 1:
+                            current_cont_prefix = tokens_cont[1]
+                        continue # CONT_ 단독 행은 단위가 없으므로 수집 생략
+                
+                # [수정] 단위가 없는 파라미터는 분석 대상에서 원천 배제(필터링)
+                if not unit_val:
+                    continue
+
                 cond_val = ""
                 if cond_row_idx < len(df):
                     cond_val = str(df.iloc[cond_row_idx, col_idx]).strip()
                     if pd.isna(df.iloc[cond_row_idx, col_idx]) or cond_val.lower() in ["nan", "'"]: cond_val = ""
-                
-                unit_val = "unit"
-                if unit_row_idx < len(df):
-                    unit_val = str(df.iloc[unit_row_idx, col_idx]).strip().replace("'", "")
-                    if pd.isna(df.iloc[unit_row_idx, col_idx]) or unit_val == "" or unit_val.lower() in ["nan", "unit"]: unit_val = ""
 
+                # [수정] 데이터 모드별 파라미터 유일 결합 키 생성 규칙 고도화 (동일 Lot 내 병합 완벽 보장)
                 p_name_key = p_name_raw.upper()
+                if self.data_mode == "Module" and current_cont_prefix:
+                    p_name_key = f"{current_cont_prefix}_{p_name_key}"
+                
                 if cond_val:
                     p_name_final = f"{p_name_key}_{cond_val.upper()}"
                 else:
@@ -283,8 +300,10 @@ class DataAnalysisApp(tk.Tk):
                 vals = pd.to_numeric(vals, errors='coerce').tolist()
                 
                 if not all(v is None or np.isnan(v) for v in vals):
+                    # 표시용 텍스트 조립용 메타 저장
+                    display_raw_title = f"{current_cont_prefix}_{p_name_raw}" if (self.data_mode == "Module" and current_cont_prefix) else p_name_raw
                     p_dict[p_name_final] = {
-                        'raw_name': p_name_raw, 'cond': cond_val, 'unit': unit_val, 'values': vals, 'units_map': units
+                        'raw_name': display_raw_title, 'cond': cond_val, 'unit': unit_val, 'values': vals, 'units_map': units
                     }
                     all_p.add(p_name_final)
             
@@ -296,7 +315,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("정상적인 파라미터 및 측정 데이터를 발굴하지 못했습니다.")
+            raise ValueError("단위를 포함한 정상적인 유효 파라미터를 발굴하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -306,7 +325,7 @@ class DataAnalysisApp(tk.Tk):
             f_meta = self.raw_files_data[self.lot_groups[g_key][0]]
             self.lot_display_names[g_key] = f"{f_meta['test_item']}_{f_meta['lot_id']}"
             
-        self.after(0, pb.update_progress, total_files, total_files, "가상화 파싱 완료")
+        self.after(0, pb.update_progress, total_files, total_files, "파싱 완료")
         self.after(250, self.init_analysis_menu)
 
     def init_analysis_menu(self):
@@ -356,7 +375,7 @@ class DataAnalysisApp(tk.Tk):
     def run_with_progress_pop(self, title_text, target_func):
         pb = AutoClosingProgressPop(self, title_text)
         def run():
-            self.after(30, lambda: pb.update_progress(50, 100, "행렬 정렬 중..."))
+            self.after(30, lambda: pb.update_progress(50, 100, "행렬 렌더러 정렬 중..."))
             target_func()
             self.after(50, lambda: pb.update_progress(100, 100, "완료되었습니다!"))
         threading.Thread(target=run, daemon=True).start()
@@ -448,6 +467,7 @@ class DataAnalysisApp(tk.Tk):
 
             if lines_dataset:
                 display_unit = "%" if self.is_delta_mode.get() else unit_str
+                # [수정] 그래프 상단 제목 포맷에서 불필요한 Lot 장식 완전 삭제 규칙 준수
                 title_formatter = f"{raw_name}_{cond_str} ({display_unit})" if cond_str else f"{raw_name} ({display_unit})"
                 line_plots_meta.append({
                     'param': param, 'title': title_formatter, 'dataset': lines_dataset, 'all_samples': [s for s in all_samples if s not in del_set]
@@ -499,7 +519,6 @@ class DataAnalysisApp(tk.Tk):
             ent = tk.Entry(rename_f, width=25, font=("맑은 고딕", 9))
             ent.insert(0, self.lot_display_names[g_key]); ent.pack(side=tk.LEFT, padx=5)
             
-            # [수정] 제목 변경 클릭 시에도 팝업창 연동 가동
             tk.Button(rename_f, text="제목 변경", font=("맑은 고딕", 8, "bold"), bg="#546e7a", fg="white", 
                       command=lambda k=g_key, e=ent: self.run_with_progress_pop("그룹 타이틀 변경 중", lambda: self.update_lot_name(k, e.get()))).pack(side=tk.LEFT)
             
@@ -533,7 +552,6 @@ class DataAnalysisApp(tk.Tk):
                     if cur_lim["min"] != "": ax.set_ylim(bottom=float(cur_lim["min"]))
                     if cur_lim["max"] != "": ax.set_ylim(top=float(cur_lim["max"]))
                     
-                    # [수정] Y축 범위 수동 개별 적용할 때도 팝업창 규칙 엄격 연동
                     tk.Button(input_f, text="적용", font=("맑은 고딕", 7, "bold"), bg="#34495e", fg="white",
                               command=lambda cid=chart_id, emin=ent_min, emax=ent_max: self.run_with_progress_pop("Y축 스케일 범위 연산 및 재적용 중", lambda: self.apply_individual_y_limit(cid, emin.get(), emax.get()))).pack(side=tk.LEFT, padx=5)
                     
@@ -543,8 +561,10 @@ class DataAnalysisApp(tk.Tk):
                             sc = ax.scatter(xi, yi, color=ci, marker=mi, s=55 if mi=='^' else 35, zorder=3, picker=3)
                             sc.__dict__['metadata'] = {'group_key': g_key, 'param': m['param'], 'unit': xi, 'ro': ro_lbl}
                     
-                    ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=9, weight='bold')
+                    # [수정] 순수 파라미터명 포맷 타이틀 노출
+                    ax.set_title(m['title'], fontsize=10, weight='bold')
                     
+                    # [수정] Discrete 분석 모드 축 눈금 레이블 및 홀수 minor grid 적용 규칙 완비
                     if self.data_mode == "Discrete":
                         tick_positions, tick_labels = [], []
                         for s_idx, s_name in enumerate(m['all_samples']):
@@ -559,11 +579,15 @@ class DataAnalysisApp(tk.Tk):
                                     tick_labels.append(s_name)
                         ax.set_xticks(tick_positions)
                         ax.set_xticklabels(tick_labels, rotation=0, fontsize=7)
+                        
+                        # 홀수 영역 minor tick 활성화를 통한 격자선 가독성 확장
+                        ax.xaxis.set_minor_locator(ticker.MultipleLocator(1))
+                        ax.grid(True, which='minor', color='#e0e0e0', linestyle='--', alpha=0.5)
                     else:
                         ax.set_xticks(range(len(m['all_samples'])))
                         ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=7)
                         
-                    ax.grid(True, linestyle=":", alpha=0.5)
+                    ax.grid(True, which='major', linestyle=":", alpha=0.6)
                     
                     handles, labels = ax.get_legend_handles_labels()
                     by_label = dict(zip(labels, handles))
@@ -611,7 +635,7 @@ class DataAnalysisApp(tk.Tk):
                     ax.set_xticklabels(m['a_labels'], fontsize=8)
                     for patch, color in zip(bp['boxes'], m['b_cols']):
                         patch.set_facecolor(color); patch.set_alpha(0.6)
-                    ax.set_title(f"{m['title']}", fontsize=9, weight='bold')
+                    ax.set_title(m['title'], fontsize=10, weight='bold')
                     ax.grid(True, alpha=0.3)
                     
                     plt.tight_layout()
@@ -735,7 +759,7 @@ class DataAnalysisApp(tk.Tk):
                                         for xi, yi, ci, mi in zip(px, py, pc, pm):
                                             ax.scatter(xi, yi, color=ci, marker=mi, s=40 if mi=='^' else 20)
                                     
-                                    ax.set_title(f"[{self.lot_display_names[g_key]}] {m['title']}", fontsize=8, weight='bold')
+                                    ax.set_title(m['title'], fontsize=8, weight='bold')
                                     
                                     if self.data_mode == "Discrete":
                                         tick_pos, tick_lbl = [], []
@@ -747,6 +771,7 @@ class DataAnalysisApp(tk.Tk):
                                                 if s_idx % 2 == 1: tick_pos.append(s_idx); tick_lbl.append(s_name)
                                         ax.set_xticks(tick_pos)
                                         ax.set_xticklabels(tick_lbl, fontsize=6)
+                                        ax.xaxis.set_minor_locator(ticker.MultipleLocator(1))
                                     else:
                                         ax.set_xticks(range(len(m['all_samples'])))
                                         ax.set_xticklabels(m['all_samples'], rotation=15, fontsize=6)
@@ -781,7 +806,7 @@ class DataAnalysisApp(tk.Tk):
                                     for patch, color in zip(bp['boxes'], m['b_cols']):
                                         patch.set_facecolor(color); patch.set_alpha(0.5)
                                         
-                                    ax.set_title(f"{m['title']}", fontsize=8, weight='bold')
+                                    ax.set_title(m['title'], fontsize=8, weight='bold')
                                     ax.grid(True, alpha=0.3)
                                     
                                     for b_idx, s in enumerate(m['stats_data']):
