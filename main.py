@@ -62,7 +62,7 @@ class AutoClosingProgressPop(tk.Toplevel):
 class DataAnalysisApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Reliability Data Analyzer v22.0 - [Plus Master Engine]")
+        self.title("Reliability Data Analyzer v23.0 - [Plus Absolute Stream]")
         self.geometry("1450x950")
         self.center_window(self, 1450, 950)
         
@@ -98,7 +98,7 @@ class DataAnalysisApp(tk.Tk):
                   bg="#2b579a", fg="white", padx=20, pady=10, command=self.handle_file_upload).pack(pady=20)
 
     def parse_filename_info(self, filename):
-        # [Module 로직 완벽 차용 이식]: 오직 파일명 자체에서 대소문자 구분 없이 '+'를 기준으로 칼처럼 3등분 분리합니다.
+        # 대소문자 완전 무시 및 기계적 + 기호 기반 3분할 맵핑 고정
         name_we = os.path.splitext(filename)[0].upper()
         tokens = [t.strip() for t in name_we.split('+') if t.strip()]
         
@@ -112,7 +112,7 @@ class DataAnalysisApp(tk.Tk):
         ro_str = ""
         ro_num = 0
         
-        # 1. 시간대 패턴 자동 감지
+        # 1. 시간대(Read-out) 추출
         for t in tokens:
             ro_match = re.search(r'(\d+)\s*(HR|CYC|MIN|SEC|DAY|WK|MONTH|R|T|STEP|ST)', t, re.IGNORECASE)
             if ro_match:
@@ -129,7 +129,7 @@ class DataAnalysisApp(tk.Tk):
         if not ro_str:
             ro_str = "0hr"
 
-        # 2. 신뢰성 마스터 키워드 감지
+        # 2. 신뢰성 키워드 매칭
         for t in tokens:
             if t in rel_keywords:
                 test_item = t
@@ -140,7 +140,7 @@ class DataAnalysisApp(tk.Tk):
                     test_item = t
                     break
 
-        # 3. 나머지는 무조건 제품 번호(LOT)로 강제 정렬 귀속 -> Legend 및 X축 버그 영구 파쇄
+        # 3. 제품군(LOT) 명확한 잔여 문자열 할당
         lot_tokens = [t for t in tokens if t != test_item and t.lower() != ro_str]
         if lot_tokens:
             lot_str = "+".join(lot_tokens)
@@ -250,7 +250,6 @@ class DataAnalysisApp(tk.Tk):
                 if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test", "'", "color"]: 
                     continue
                 
-                # [차용 가이드 핵심 이식]: Discrete 모드 구동 시 모듈용 CONT 간섭 연산 단절 처리격리
                 if self.data_mode == "Module":
                     if "scan" in p_name_raw.lower(): continue
                     if p_name_raw.upper().startswith("CONT_"):
@@ -282,7 +281,7 @@ class DataAnalysisApp(tk.Tk):
                     all_p.add(p_name_final)
             
             if p_dict:
-                # [덮어쓰기 유실 완벽 버그 치유]: Module과 동일하게 리스트 누적형태의 고유 맵핑 체인 생성
+                # [백지화 버그 근본 패치 완료]: 파라미터 간 충돌을 방지하기 위해 파일 인덱스를 명확히 결합한 리스트 체인을 생성합니다.
                 unique_fname_key = f"{fname}_{idx}"
                 temp_data[unique_fname_key] = {'lot_key': group_key, 'ro': ro, 'ro_num': ro_n, 'params': p_dict, 'test_item': test_item, 'lot_id': lot_id}
                 if group_key not in self.lot_groups: 
@@ -290,7 +289,7 @@ class DataAnalysisApp(tk.Tk):
                 self.lot_groups[group_key].append(unique_fname_key)
 
         if not all_p: 
-            raise ValueError("단위 컬럼이 맵핑된 유효성 파라미터가 검출되지 않았습니다.")
+            raise ValueError("단위 컬럼이 정렬된 유효 파라미터를 발굴하지 못했습니다.")
         
         self.parameter_list = sorted(list(all_p))
         self.raw_files_data = temp_data
@@ -298,7 +297,6 @@ class DataAnalysisApp(tk.Tk):
         for g_key in self.lot_groups:
             self.lot_groups[g_key].sort(key=lambda x: self.raw_files_data[x]['ro_num'])
             f_meta = self.raw_files_data[self.lot_groups[g_key][0]]
-            # 웅장한 Chart Group 이름으로 [신뢰성_LOT] 표출 완벽 보정
             self.lot_display_names[g_key] = f"{f_meta['test_item']}_{f_meta['lot_id']}"
             
         self.after(0, pb.update_progress, total_files, total_files, "파싱 완료")
@@ -348,15 +346,25 @@ class DataAnalysisApp(tk.Tk):
         
         self.run_with_progress_pop("초기 그래프 로딩 중", self.update_selections_and_render)
 
-    def update_lot_name(self, g_key, new_name):
-        if not new_name.strip(): return
-        self.lot_display_names[g_key] = new_name.strip()
-        self.run_with_progress_pop("그룹 타이틀 변경 중", self.execute_ui_rendering)
+    def run_with_progress_pop(self, title_text, target_func):
+        pb = AutoClosingProgressPop(self, title_text)
+        def run():
+            self.after(50, lambda: pb.update_progress(30, 100, "데이터 정렬 중..."))
+            self.after(150, lambda: pb.update_progress(60, 100, "행렬 매칭 연산 중..."))
+            target_func()
+            self.after(250, lambda: pb.update_progress(100, 100, "완료되었습니다!"))
+        threading.Thread(target=run, daemon=True).start()
 
-    def return_to_home_screen(self):
-        if messagebox.askyesno("화면 초기화", "분석을 종료하고 처음 파일 선택 화면으로 이동하시겠습니까?"):
-            self.reset_internal_states()
-            self.init_upload_menu()
+    def _on_mouse_wheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def update_selections_and_render(self):
+        selections = self.param_listbox.curselection()
+        sel_items = [self.param_listbox.get(i) for i in selections]
+        if "★ 전체 선택" in sel_items: self.selected_parameters = self.parameter_list.copy()
+        else: self.selected_parameters = [v for v in sel_items if v != "★ 전체 선택"]
+        if not self.selected_parameters: return
+        self.execute_ui_rendering()
 
     def build_chart_data_structures(self, target_group_key):
         lot_files = self.lot_groups[target_group_key]
@@ -486,7 +494,6 @@ class DataAnalysisApp(tk.Tk):
                     cell = tk.Frame(grid_frame, bd=1, relief=tk.RIDGE, bg="white")
                     cell.grid(row=idx//cols, column=idx%cols, padx=4, pady=4, sticky="nsew")
                     
-                    # [개별 Y축 제어 UI]: 각 차트 상단 폼 임베디드 적용
                     input_f = tk.Frame(cell, bg="white")
                     input_f.pack(fill=tk.X, padx=5, pady=2)
                     tk.Label(input_f, text=f"Y축 범위:", bg="white", font=("맑은 고딕", 8)).pack(side=tk.LEFT)
@@ -568,7 +575,6 @@ class DataAnalysisApp(tk.Tk):
                     
                     ax_stat.axis('off')
                     
-                    # [통계축 수직 레이아웃]: 각 Lot 하단에 고정 캡쳐세트 배열 안착
                     for b_idx, s in enumerate(m['stats_data']):
                         x_pos = b_idx + 1
                         stat_text = f"[{s['ro']}]\nMin:{s['min']:.2f}\nMax:{s['max']:.2f}\nAVG:{s['avg']:.2f}\nSTD:{s['std']:.2f}"
@@ -695,7 +701,7 @@ class DataAnalysisApp(tk.Tk):
                                 plt.close(fig)
                                 
                         if box_meta:
-                            # [요청 규칙 2 스펙 고정]: 무조건 4개 * 3줄 = 12개 정형 그리드로 페이지 면적 왜곡 완전 방지
+                            # 4개 * 3줄 = 12개 정형 그리드로 페이지 규격 왜곡 완전 차단
                             b_cols, b_rows, b_items_per_page = 4, 3, 12
                             for i in range(0, len(box_meta), b_items_per_page):
                                 chunk = box_meta[i:i+b_items_per_page]
