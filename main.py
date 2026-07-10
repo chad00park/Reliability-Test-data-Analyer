@@ -87,7 +87,7 @@ class DataAnalysisApp(tk.Tk):
         hs = win.winfo_screenheight()
         x = (ws / 2) - (w / 2)
         y = (hs / 2) - (h / 2)
-        win.geometry(f'{w}+{"h"}+{int(x)}+{int(y)}')
+        # [수정 완료]: 문자열 'h' 오타 완벽히 제거 및 정형 포맷 복구
         win.geometry(f'{w}x{h}+{int(x)}+{int(y)}')
 
     def init_upload_menu(self):
@@ -198,31 +198,32 @@ class DataAnalysisApp(tk.Tk):
             test_no_row_idx = None
             start_col_idx = None
             
-            # 1열(인덱스 0) 기준 키워드 자동 행 추적 매칭 강화
+            # [수정 완료]: 1열(0번 인덱스) 기준 행 추적 연산 방식 전면 수정
+            # 'T1' 컬럼명이 적혀 있는 바로 그 행을 찾아 파라미터 이름의 행 인덱스로 동적 고정
             for i in range(min(100, len(df))):
                 col0_str = str(df.iloc[i, 0]).strip().replace(" ", "").lower()
-                if "parameter" in col0_str:
-                    p_name_row_idx = i
-                    for c_idx in range(df.shape[1]):
-                        if re.match(r'^t1$', str(df.iloc[i, c_idx]).strip(), re.IGNORECASE):
-                            start_col_idx = c_idx
-                            break
+                
+                # 가변적인 구조에서도 데이터 헤더 열(T1)이 검출되는 행을 직접 파라미터명 위치로 선점
+                for c_idx in range(df.shape[1]):
+                    if re.match(r'^t1$', str(df.iloc[i, c_idx]).strip(), re.IGNORECASE):
+                        start_col_idx = c_idx
+                        p_name_row_idx = i  # T1, T2가 들어 있는 그 행 자체를 파라미터 명의 행으로 취급
+                        break
+                
                 if "unit" in col0_str:
                     unit_row_idx = i
                 if "testno" in col0_str:
                     test_no_row_idx = i
 
-            # 1열 매칭 실패 시 백업용 기본값 처리 규칙 유지
-            if p_name_row_idx is None: p_name_row_idx = 19
-            else: p_name_row_idx = p_name_row_idx + 1 # 실제 파라미터명 이름이 있는 행 위치 보정
-            
+            # 매칭 실패 시를 대비한 예외 방어선 코드
+            if p_name_row_idx is None: p_name_row_idx = 20
             if unit_row_idx is None: unit_row_idx = 26
             if test_no_row_idx is None: test_no_row_idx = 46
             if start_col_idx is None: start_col_idx = 7
 
             if test_no_row_idx >= len(df): continue
             
-            # 시료 번호 추출 (1열에서 숫자 형태 데이터 행 파싱)
+            # 시료 번호 파싱
             units = []
             data_row_positions = []
             for i in range(test_no_row_idx + 1, len(df)):
@@ -252,7 +253,7 @@ class DataAnalysisApp(tk.Tk):
                 if pd.isna(df.iloc[p_name_row_idx, col_idx]) or p_name_raw == "" or p_name_raw.lower() in ["nan", "item", "parameter", "test", "'", "color"]: 
                     continue
                 
-                # Module 분석 모드 전용 접두사 코드 격리
+                # Module 분석 모드 접두사 격리
                 if self.data_mode == "Module":
                     if "scan" in p_name_raw.lower(): continue
                     if p_name_raw.upper().startswith("CONT_"):
@@ -261,7 +262,7 @@ class DataAnalysisApp(tk.Tk):
                 
                 p_name_final = p_name_raw
                 
-                # Module 모드일 때만 하위 세부 명칭 규칙을 엮어주어 구조적 혼선 차단
+                # Module 모드일 경우에만 추가 접미사 결합 처리
                 if self.data_mode == "Module":
                     sub_name_idx = p_name_row_idx + 3
                     if sub_name_idx < len(df):
@@ -491,7 +492,6 @@ class DataAnalysisApp(tk.Tk):
             if line_meta:
                 grid_frame = tk.Frame(self.scrollable_frame)
                 grid_frame.pack(fill=tk.X, padx=15, pady=5)
-                # Discrete 모드에서도 다중 파라미터를 격자형(3열)으로 보기 쉽게 정렬 적용
                 cols = 3
                 for c in range(cols): grid_frame.grid_columnconfigure(c, weight=1)
                 
